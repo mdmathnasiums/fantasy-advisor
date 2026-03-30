@@ -96,8 +96,8 @@ def _parse_roster_response(data: dict) -> list[dict]:
         )
 
 
-async def get_roster(league_id: str) -> list[dict]:
-    """Fetch the authenticated user's roster for a given league."""
+async def fetch_raw_roster(league_id: str) -> dict:
+    """Fetch raw Yahoo roster JSON for a given league (no parsing)."""
     if league_id not in LEAGUES:
         raise ValueError(f"Unknown league_id: {league_id}")
     league_key = LEAGUES[league_id]["key"]
@@ -114,5 +114,10 @@ async def get_roster(league_id: str) -> list[dict]:
             timeout=20.0,
         )
         resp.raise_for_status()
-        data = resp.json()
+        return resp.json()
+
+
+async def get_roster(league_id: str) -> list[dict]:
+    """Fetch and parse the authenticated user's roster for a given league."""
+    data = await fetch_raw_roster(league_id)
     return _parse_roster_response(data)
