@@ -1,6 +1,3 @@
-import httpx
-from yahoo_auth import token_store
-
 API_BASE = "https://fantasysports.yahooapis.com/fantasy/v2"
 
 LEAGUES = {
