@@ -1,3 +1,6 @@
+import httpx
+from yahoo_auth import token_store
+
 API_BASE = "https://fantasysports.yahooapis.com/fantasy/v2"
 
 LEAGUES = {
@@ -55,3 +58,61 @@ def parse_player(player_data: list) -> dict:
         "bats": None,
         "mlb_id": None,
     }
+
+
+def _extract_players_from_roster(roster_data: dict) -> list[dict]:
+    """Extract player list from Yahoo's roster sub-object."""
+    players_obj = roster_data.get("0", {}).get("players", {})
+    count = int(players_obj.get("count", 0))
+    players = []
+    for i in range(count):
+        player_entry = players_obj.get(str(i), {}).get("player", [])
+        if player_entry:
+            players.append(parse_player(player_entry))
+    return players
+
+
+def _parse_roster_response(data: dict) -> list[dict]:
+    """Navigate Yahoo's deeply nested response to find roster players.
+
+    Yahoo's compound query nests:
+    fantasy_content → users → 0 → user →
+    [2] → games → 0 → game →
+    [1] → leagues → 0 → league →
+    [1] → teams → 0 → team → [1] → roster
+    """
+    try:
+        fc = data["fantasy_content"]
+        user = fc["users"]["0"]["user"]
+        game = user[2]["games"]["0"]["game"]
+        league = game[1]["leagues"]["0"]["league"]
+        team = league[1]["teams"]["0"]["team"]
+        roster = team[1]["roster"]
+        return _extract_players_from_roster(roster)
+    except (KeyError, IndexError, TypeError) as e:
+        raise ValueError(
+            f"Failed to parse Yahoo roster response. "
+            f"Use /api/debug/yahoo/{{league_id}} to inspect raw response. Error: {e}"
+        )
+
+
+async def get_roster(league_id: str) -> list[dict]:
+    """Fetch the authenticated user's roster for a given league."""
+    if league_id not in LEAGUES:
+        raise ValueError(f"Unknown league_id: {league_id}")
+    league_key = LEAGUES[league_id]["key"]
+    access_token = await token_store.get_access_token()
+    url = (
+        f"{API_BASE}/users;use_login=1/games;game_keys=mlb"
+        f"/leagues;league_keys={league_key}/teams/roster/players"
+    )
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            url,
+            params={"format": "json"},
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=20.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    return _parse_roster_response(data)
