@@ -1,3 +1,4 @@
+import html
 import os
 import secrets
 from fastapi import FastAPI, HTTPException, Request
@@ -30,10 +31,10 @@ async def auth_callback(code: str, state: str = ""):
         raise HTTPException(status_code=400, detail=f"Token exchange failed: {e}")
     token_store.set_tokens(
         data["access_token"],
-        data.get("refresh_token", ""),
+        data.get("refresh_token") or token_store.refresh_token or "",
         data.get("expires_in", 3600),
     )
-    rt = data.get("refresh_token", "")
+    rt = html.escape(data.get("refresh_token", ""))
     return HTMLResponse(f"""
 <!DOCTYPE html><html><body style="font-family:sans-serif;padding:2rem">
 <h2>&#10003; Authentication successful!</h2>
