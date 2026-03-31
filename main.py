@@ -135,8 +135,12 @@ PITCHER_POSITIONS = {"SP", "RP", "P"}
 @app.get("/api/today")
 async def today_view():
     today = date.today()
-    pitchers = await get_probable_pitchers(today)
-    pitchers = await enrich_pitchers(pitchers)
+    try:
+        pitchers = await get_probable_pitchers(today)
+        pitchers = await enrich_pitchers(pitchers)
+    except Exception as exc:
+        print(f"[main] MLB schedule fetch failed: {exc}")
+        pitchers = {}  # degrade gracefully — all hitters get has_game=False
 
     results = []
     for league_id, league_info in LEAGUES.items():
