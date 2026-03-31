@@ -1,6 +1,18 @@
 # advisor.py
 from dataclasses import dataclass, field
 
+# Hardcoded elite hitters who should never sit unless facing an ace while cold.
+# Used as a fallback when OPS data isn't available (e.g. early season).
+ELITE_PLAYERS = {
+    "freddie freeman", "shohei ohtani", "aaron judge", "juan soto",
+    "kyle tucker", "jazz chisholm", "mookie betts", "corey seager",
+    "jose ramirez", "rafael devers", "vladimir guerrero jr", "vladimir guerrero",
+    "bryce harper", "yordan alvarez", "gunnar henderson", "bobby witt jr",
+    "elly de la cruz", "corbin carroll", "julio rodriguez", "steven kwan",
+    "trea turner", "pete alonso", "michael harris ii", "michael harris",
+    "william contreras", "adley rutschman", "cal raleigh",
+}
+
 POSITION_ORDER = {
     "C": 0, "1B": 1, "2B": 2, "3B": 3, "SS": 4,
     "CI": 5, "MI": 6, "OF": 7, "Util": 8, "UTIL": 8,
@@ -173,16 +185,20 @@ def recommend(score: float, all_scores: list[float], is_ace_pitcher: bool) -> st
 
 
 def _apply_star_protection(rec: str, hitter: HitterInfo, ace: bool) -> str:
-    """Stars should rarely sit. OPS ≥.950 → floor Flex. OPS ≥.850 → floor Flex unless ace + cold."""
-    if hitter.ops is None:
-        return rec
+    """Stars should rarely sit.
+    - OPS ≥.950 OR known elite player → floor Flex always
+    - OPS ≥.850 → floor Flex unless facing ace AND cold (slumping last 7 days)
+    Works even when OPS data is unavailable by checking the ELITE_PLAYERS list.
+    """
     if rec != "Sit":
         return rec
     cold = hitter.recent_avg is not None and hitter.recent_avg <= 0.180
-    if hitter.ops >= 0.950:
-        return "Flex"  # elite stars always at least Flex
-    if hitter.ops >= 0.850 and not (ace and cold):
-        return "Flex"  # good stars sit only when facing ace AND slumping
+    is_known_elite = hitter.full_name.lower() in ELITE_PLAYERS
+
+    if is_known_elite or (hitter.ops is not None and hitter.ops >= 0.950):
+        return "Flex"
+    if hitter.ops is not None and hitter.ops >= 0.850 and not (ace and cold):
+        return "Flex"
     return rec
 
 

@@ -83,6 +83,43 @@ async def debug_yahoo(league_id: str):
     return await fetch_raw_roster(league_id)
 
 
+@app.get("/api/debug/mlb/{player_name}")
+async def debug_mlb(player_name: str):
+    """Diagnose MLB API data for a player. Shows raw splits, OPS, recent avg, ID lookup."""
+    import httpx as _httpx
+    MLB_BASE = "https://statsapi.mlb.com/api/v1"
+    season = date.today().year
+
+    mlb_id = await search_player(player_name)
+    if not mlb_id:
+        return {"error": f"Player '{player_name}' not found in MLB people search", "mlb_id": None}
+
+    try:
+        async with _httpx.AsyncClient() as client:
+            splits_resp, season_resp, gamelog_resp = await asyncio.gather(
+                client.get(f"{MLB_BASE}/people/{mlb_id}",
+                           params={"hydrate": f"stats(group=hitting,type=statSplits,season={season})"},
+                           timeout=10.0),
+                client.get(f"{MLB_BASE}/people/{mlb_id}",
+                           params={"hydrate": f"stats(group=hitting,type=season,season={season})"},
+                           timeout=10.0),
+                client.get(f"{MLB_BASE}/people/{mlb_id}",
+                           params={"hydrate": f"stats(group=hitting,type=gameLog,season={season})"},
+                           timeout=10.0),
+            )
+        return {
+            "mlb_id": mlb_id,
+            "splits_status": splits_resp.status_code,
+            "season_status": season_resp.status_code,
+            "gamelog_status": gamelog_resp.status_code,
+            "splits_raw": splits_resp.json(),
+            "season_raw": season_resp.json(),
+            "gamelog_first_5": gamelog_resp.json().get("people", [{}])[0].get("stats", [{}])[0].get("splits", [])[:5] if gamelog_resp.status_code == 200 else [],
+        }
+    except Exception as e:
+        return {"mlb_id": mlb_id, "error": str(e)}
+
+
 @app.get("/api/roster/{league_id}")
 async def roster(league_id: str):
     if league_id not in LEAGUES:
