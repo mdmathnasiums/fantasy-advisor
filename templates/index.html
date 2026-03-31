@@ -98,7 +98,7 @@
   .rec-start { background: rgba(99,153,34,0.2); color: var(--green); border: 1px solid rgba(99,153,34,0.4); }
   .rec-sit { background: rgba(163,45,45,0.2); color: var(--red); border: 1px solid rgba(163,45,45,0.4); }
   .rec-flex { background: rgba(186,117,23,0.2); color: var(--amber); border: 1px solid rgba(186,117,23,0.4); }
-  .rec-nogame { background: var(--surface2); color: var(--text-muted); border: 1px solid var(--border); }
+  .rec-nogame { background: var(--surface2); color: var(--text-muted); border: 1px solid var(--border); font-size: 11px; }
 
   /* Active toggle */
   .toggle { position: relative; display: inline-block; width: 34px; height: 18px; cursor: pointer; }
@@ -183,7 +183,7 @@
 </main>
 
 <footer>
-  <button class="footer-btn">Waiver Suggestions</button>
+  <button class="footer-btn" disabled title="Coming in v2">Waiver Suggestions</button>
   <button class="footer-btn" disabled title="Coming in v2">Push Lineup to Yahoo</button>
 </footer>
 
@@ -191,6 +191,10 @@
 let allData = [];
 let activeLeagueId = null;
 let activeFilter = 'all';
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
 
 function fmtAvg(v) {
   if (v == null) return '—';
@@ -246,11 +250,14 @@ function renderTabs() {
   const container = document.getElementById('league-tabs');
   container.innerHTML = allData.map(l => `
     <button class="tab-btn ${l.league_id === activeLeagueId ? 'active' : ''}"
-            data-id="${l.league_id}">${l.league_name}</button>
+            data-id="${esc(l.league_id)}">${esc(l.league_name)}</button>
   `).join('');
   container.querySelectorAll('.tab-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       activeLeagueId = btn.dataset.id;
+      activeFilter = 'all';
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      document.querySelector('.filter-btn[data-filter="all"]').classList.add('active');
       renderTabs();
       renderAll();
     });
@@ -299,7 +306,7 @@ function buildRow(player) {
   const throws = p?.throws;
   const matchupHtml = player.has_game ? `
     <span class="matchup-pill ${matchupClass(player.matchup_quality)}">${matchupLabel(player.matchup_quality)}</span>
-    ${p ? `<div class="pitcher-line">${p.name} ${handBadge(throws, 'pitcher')}
+    ${p ? `<div class="pitcher-line">${esc(p.name)} ${handBadge(throws, 'pitcher')}
       ${p.is_ace ? '<span class="ace-flag" title="Ace pitcher">&#9733;</span>' : ''}
       <span class="pitcher-stat">${p.era != null ? p.era.toFixed(2) + ' ERA' : '—'}</span>
       <span class="pitcher-stat"> ${p.whip != null ? p.whip.toFixed(2) + ' WHIP' : ''}</span>
@@ -315,8 +322,8 @@ function buildRow(player) {
   return `<tr class="${benchClass}" data-rec="${player.recommendation}" data-has-game="${player.has_game}">
     <td><span class="pos-tag">${player.selected_position || player.position}</span></td>
     <td>
-      <div><strong>${player.full_name}</strong> ${handBadge(player.bats, 'batter')}</div>
-      <div style="font-size:11px;color:var(--text-muted)">${player.team_abbr} &middot; ${player.position}</div>
+      <div><strong>${esc(player.full_name)}</strong> ${handBadge(player.bats, 'batter')}</div>
+      <div style="font-size:11px;color:var(--text-muted)">${esc(player.team_abbr)} &middot; ${esc(player.position)}</div>
     </td>
     <td>${matchupHtml}</td>
     <td class="splits-col">${buildSplitBars(player.splits, throws)}</td>
@@ -380,7 +387,7 @@ async function init() {
     allData = await resp.json();
   } catch (err) {
     document.getElementById('error-container').innerHTML =
-      `<div class="error-msg">Failed to load data: ${err.message}. Check that Yahoo auth is configured.</div>`;
+      `<div class="error-msg">Failed to load data: ${esc(err.message)}. Check that Yahoo auth is configured.</div>`;
     document.getElementById('loading').textContent = 'Error loading data.';
     return;
   }
