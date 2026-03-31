@@ -35,12 +35,13 @@ async def get_probable_pitchers(game_date: date | None = None) -> dict[str, dict
     return pitchers
 
 
-async def get_pitcher_details(mlb_id: int) -> dict:
+async def get_pitcher_details(mlb_id: int, season: int | None = None) -> dict:
     """Get pitcher's throws (L/R), current-season ERA and WHIP."""
+    season = season or date.today().year
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{MLB_BASE}/people/{mlb_id}",
-            params={"hydrate": f"stats(group=pitching,type=season,season={date.today().year})"},
+            params={"hydrate": f"stats(group=pitching,type=season,season={season})"},
             timeout=10.0,
         )
         resp.raise_for_status()
@@ -76,8 +77,8 @@ async def enrich_pitchers(pitchers: dict[str, dict]) -> dict[str, dict]:
             try:
                 details = await get_pitcher_details(info["mlb_id"])
                 return abbr, {**info, **details}
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"[mlb_api] enrich_pitchers: failed to enrich {abbr}: {exc}")
         return abbr, info
 
     pairs = await asyncio.gather(*[_enrich_one(a, i) for a, i in pitchers.items()])
@@ -86,8 +87,8 @@ async def enrich_pitchers(pitchers: dict[str, dict]) -> dict[str, dict]:
 
 async def search_player(name: str) -> int | None:
     """Look up MLB player ID by full name. Returns first match or None."""
-    async with httpx.AsyncClient() as client:
-        try:
+    try:
+        async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"{MLB_BASE}/people/search",
                 params={"names": name, "sportId": 1},
@@ -95,10 +96,10 @@ async def search_player(name: str) -> int | None:
             )
             resp.raise_for_status()
             data = resp.json()
-        except Exception:
-            return None
-    people = data.get("people", [])
-    return people[0].get("id") if people else None
+        people = data.get("people", [])
+        return people[0].get("id") if people else None
+    except Exception:
+        return None
 
 
 async def get_hitter_details(mlb_id: int, season: int | None = None) -> dict:
