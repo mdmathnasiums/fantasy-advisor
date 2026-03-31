@@ -13,7 +13,8 @@ from yahoo_auth import token_store, get_auth_url, exchange_code
 from yahoo_api import fetch_raw_roster, get_roster, LEAGUES
 from mlb_api import (
     get_probable_pitchers, enrich_pitchers,
-    search_player, get_hitter_details,
+    search_player, get_hitter_details, get_career_vs_pitcher,
+    PARK_FACTORS,
 )
 from advisor import HitterInfo, PitcherInfo, advise_roster
 
@@ -93,39 +94,84 @@ async def roster(league_id: str):
 
 
 async def _enrich_hitter(
-    p: dict, pitchers: dict[str, dict], season: int
+    p: dict,
+    pitchers: dict[str, dict],
+    teams_with_game: set[str],
+    game_venue: dict[str, str],
+    season: int,
 ) -> HitterInfo:
-    """Look up MLB ID, fetch splits, build HitterInfo. Never raises."""
+    """Look up MLB ID, fetch all hitter/pitcher enrichment in parallel. Never raises."""
+    team = p["team_abbr"]
+    pitcher_raw = pitchers.get(team)
+    pitcher_mlb_id = pitcher_raw.get("mlb_id") if pitcher_raw else None
+
     mlb_id = await search_player(p["full_name"])
-    splits = {"vL": None, "vR": None}
+
+    splits = {"vL": None, "vR": None, "home_avg": None, "away_avg": None}
     bats = p.get("bats")
+    ops = None
+    recent_avg = None
+    career_vs_pitcher = None
+
     if mlb_id:
         try:
-            details = await get_hitter_details(mlb_id, season)
-            splits = {"vL": details.get("vL"), "vR": details.get("vR")}
-            bats = details.get("bats") or bats
+            tasks = [get_hitter_details(mlb_id, season)]
+            if pitcher_mlb_id:
+                tasks.append(get_career_vs_pitcher(mlb_id, pitcher_mlb_id))
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            if not isinstance(results[0], Exception):
+                details = results[0]
+                splits = {
+                    "vL": details.get("vL"),
+                    "vR": details.get("vR"),
+                    "home_avg": details.get("home_avg"),
+                    "away_avg": details.get("away_avg"),
+                }
+                bats = details.get("bats") or bats
+                ops = details.get("ops")
+                recent_avg = details.get("recent_avg")
+
+            if len(results) > 1 and not isinstance(results[1], Exception):
+                career_vs_pitcher = results[1]
         except Exception:
             pass
 
-    pitcher_raw = pitchers.get(p["team_abbr"])
+    has_game = team in teams_with_game
+    home_team = game_venue.get(team, team)
+    is_home = home_team == team
+    park_factor = PARK_FACTORS.get(home_team, 1.0)
+
     pitcher = None
-    if pitcher_raw:
+    if has_game and pitcher_raw:
         pitcher = PitcherInfo(
             name=pitcher_raw["name"],
             throws=pitcher_raw.get("throws") or "R",
             era=pitcher_raw.get("era"),
             whip=pitcher_raw.get("whip"),
+            recent_era=pitcher_raw.get("recent_era"),
+            recent_whip=pitcher_raw.get("recent_whip"),
+            eff_era=pitcher_raw.get("eff_era"),
+            eff_whip=pitcher_raw.get("eff_whip"),
         )
+    elif has_game:
+        pitcher = PitcherInfo(name="TBD", throws="R", era=None, whip=None)
 
     return HitterInfo(
         player_id=p["player_id"],
         full_name=p["full_name"],
-        team_abbr=p["team_abbr"],
+        team_abbr=team,
         position=p["position"],
         selected_position=p["selected_position"],
         bats=bats,
         splits=splits,
         pitcher=pitcher,
+        ops=ops,
+        recent_avg=recent_avg,
+        career_vs_pitcher=career_vs_pitcher,
+        park_factor=park_factor,
+        is_home=is_home,
     )
 
 
@@ -135,8 +181,10 @@ PITCHER_POSITIONS = {"SP", "RP", "P"}
 @app.get("/api/today")
 async def today_view():
     today = date.today()
+    teams_with_game: set[str] = set()
+    game_venue: dict[str, str] = {}
     try:
-        pitchers = await get_probable_pitchers(today)
+        pitchers, teams_with_game, game_venue = await get_probable_pitchers(today)
         pitchers = await enrich_pitchers(pitchers)
     except Exception as exc:
         print(f"[main] MLB schedule fetch failed: {exc}")
@@ -157,10 +205,11 @@ async def today_view():
         candidates = [
             p for p in raw_players
             if p["position"] not in PITCHER_POSITIONS
+            and not any(ep in PITCHER_POSITIONS for ep in p.get("eligible_positions", []))
         ]
 
         hitters = await asyncio.gather(
-            *[_enrich_hitter(p, pitchers, today.year) for p in candidates]
+            *[_enrich_hitter(p, pitchers, teams_with_game, game_venue, today.year) for p in candidates]
         )
 
         advised = advise_roster(list(hitters))

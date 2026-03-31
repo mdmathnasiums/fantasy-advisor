@@ -1,5 +1,5 @@
 # advisor.py
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 POSITION_ORDER = {
     "C": 0, "1B": 1, "2B": 2, "3B": 3, "SS": 4,
@@ -11,9 +11,13 @@ POSITION_ORDER = {
 @dataclass
 class PitcherInfo:
     name: str
-    throws: str      # "L" or "R"
+    throws: str           # "L" or "R"
     era: float | None
     whip: float | None
+    recent_era: float | None = None   # last 3 starts
+    recent_whip: float | None = None
+    eff_era: float | None = None      # 60% recent + 40% season blend
+    eff_whip: float | None = None
 
 
 @dataclass
@@ -23,32 +27,75 @@ class HitterInfo:
     team_abbr: str
     position: str
     selected_position: str
-    bats: str | None     # "L", "R", "S"
-    splits: dict         # {"vL": float|None, "vR": float|None}
-    pitcher: PitcherInfo | None   # None = no game today
+    bats: str | None          # "L", "R", "S"
+    splits: dict              # {"vL", "vR", "home_avg", "away_avg"}
+    pitcher: PitcherInfo | None
+    ops: float | None = None
+    recent_avg: float | None = None
+    career_vs_pitcher: dict | None = None   # {"avg": float, "pa": int} or None
+    park_factor: float = 1.0
+    is_home: bool = False
 
 
 def is_ace(pitcher: PitcherInfo) -> bool:
-    if pitcher.era is not None and pitcher.era < 3.00:
+    eff_era = pitcher.eff_era if pitcher.eff_era is not None else pitcher.era
+    eff_whip = pitcher.eff_whip if pitcher.eff_whip is not None else pitcher.whip
+    if eff_era is not None and eff_era < 3.00:
         return True
-    if pitcher.whip is not None and pitcher.whip < 1.00:
+    if eff_whip is not None and eff_whip < 1.00:
         return True
     return False
 
 
 def score_hitter(hitter: HitterInfo) -> float:
-    """Score = (split_avg * 3.0) + (1/ERA * 2.0) + (1/WHIP * 1.5)"""
+    """
+    Score components:
+      - Split avg vs pitcher handedness (or career vs pitcher if ≥10 PA): weight 3.0
+      - Blended with home/away split (70% L/R, 30% home/away) when available
+      - Opponent effective ERA (60% recent + 40% season): weight 2.0
+      - Opponent effective WHIP: weight 1.5
+      - Hot/cold modifier: ±10% based on last 14 days
+      - Park factor multiplier
+    """
     if hitter.pitcher is None:
         return 0.0
     p = hitter.pitcher
-    split_avg = (
-        hitter.splits.get("vL") if p.throws == "L" else hitter.splits.get("vR")
-    )
-    era = p.era if p.era and p.era > 0 else 4.50   # league-average fallback
-    whip = p.whip if p.whip and p.whip > 0 else 1.30
-    score = (split_avg * 3.0 if split_avg is not None else 0.0)
+
+    # Best available split avg
+    if hitter.career_vs_pitcher is not None:
+        split_avg = hitter.career_vs_pitcher["avg"]
+    else:
+        split_avg = (
+            hitter.splits.get("vL") if p.throws == "L" else hitter.splits.get("vR")
+        )
+
+    # Blend home/away context into the split avg
+    home_away_avg = hitter.splits.get("home_avg" if hitter.is_home else "away_avg")
+    if split_avg is not None and home_away_avg is not None:
+        split_avg = split_avg * 0.7 + home_away_avg * 0.3
+    elif home_away_avg is not None and split_avg is None:
+        split_avg = home_away_avg
+
+    # Use effective (blended) ERA/WHIP, fall back to season, then league average
+    era_val = p.eff_era if p.eff_era and p.eff_era > 0 else (p.era if p.era and p.era > 0 else None)
+    whip_val = p.eff_whip if p.eff_whip and p.eff_whip > 0 else (p.whip if p.whip and p.whip > 0 else None)
+    era = era_val if era_val else 4.50
+    whip = whip_val if whip_val else 1.30
+
+    score = (split_avg if split_avg is not None else 0.250) * 3.0
     score += (1.0 / era) * 2.0
     score += (1.0 / whip) * 1.5
+
+    # Hot/cold streak modifier
+    if hitter.recent_avg is not None:
+        if hitter.recent_avg >= 0.300:
+            score *= 1.10
+        elif hitter.recent_avg <= 0.180:
+            score *= 0.90
+
+    # Park factor
+    score *= hitter.park_factor
+
     return score
 
 
@@ -56,7 +103,11 @@ def get_matchup_quality(hitter: HitterInfo) -> str:
     if hitter.pitcher is None:
         return "ok"
     p = hitter.pitcher
-    avg = hitter.splits.get("vL") if p.throws == "L" else hitter.splits.get("vR")
+    # Prefer career vs pitcher, then L/R split
+    if hitter.career_vs_pitcher is not None:
+        avg = hitter.career_vs_pitcher["avg"]
+    else:
+        avg = hitter.splits.get("vL") if p.throws == "L" else hitter.splits.get("vR")
     if avg is None:
         return "ok"
     if avg >= 0.270:
@@ -71,7 +122,7 @@ def recommend(score: float, all_scores: list[float], is_ace_pitcher: bool) -> st
     Start = score >= 60th percentile of active hitters
     Sit   = score <= 25th percentile of active hitters
     Flex  = middle
-    Ace pitcher (ERA<3.00 or WHIP<1.00) downgrades by one level: Start→Flex, Flex→Sit.
+    Ace pitcher (effective ERA<3 or WHIP<1) downgrades by one level.
     """
     if not all_scores:
         return "Flex"
@@ -96,23 +147,67 @@ def recommend(score: float, all_scores: list[float], is_ace_pitcher: bool) -> st
     return rec
 
 
+def _apply_star_protection(rec: str, hitter: HitterInfo, ace: bool) -> str:
+    """Stars should rarely sit. OPS ≥.950 → floor Flex. OPS ≥.850 → floor Flex unless ace + cold."""
+    if hitter.ops is None:
+        return rec
+    if rec != "Sit":
+        return rec
+    cold = hitter.recent_avg is not None and hitter.recent_avg <= 0.180
+    if hitter.ops >= 0.950:
+        return "Flex"  # elite stars always at least Flex
+    if hitter.ops >= 0.850 and not (ace and cold):
+        return "Flex"  # good stars sit only when facing ace AND slumping
+    return rec
+
+
 def build_reason(hitter: HitterInfo, rec: str, ace: bool) -> str:
     """One-line explanation of the recommendation."""
     if hitter.pitcher is None:
         return "No game scheduled today"
     p = hitter.pitcher
-    throws = p.throws
-    split_avg = hitter.splits.get("vL") if throws == "L" else hitter.splits.get("vR")
-    side = "vL" if throws == "L" else "vR"
 
     parts = []
-    if split_avg is not None:
-        avg_str = f".{int(round(split_avg * 1000)):03d}"
-        parts.append(f"{avg_str} {side}")
+
+    # Hot/cold form
+    if hitter.recent_avg is not None:
+        avg_str = f".{int(round(hitter.recent_avg * 1000)):03d}"
+        if hitter.recent_avg >= 0.300:
+            parts.append(f"hot streak ({avg_str} L14)")
+        elif hitter.recent_avg <= 0.180:
+            parts.append(f"slumping ({avg_str} L14)")
+
+    # Best available split
+    if hitter.career_vs_pitcher is not None:
+        avg_str = f".{int(round(hitter.career_vs_pitcher['avg'] * 1000)):03d}"
+        parts.append(f"{avg_str} career vs pitcher ({hitter.career_vs_pitcher['pa']} PA)")
+    else:
+        throws = p.throws
+        split_avg = hitter.splits.get("vL") if throws == "L" else hitter.splits.get("vR")
+        side = "vL" if throws == "L" else "vR"
+        if split_avg is not None:
+            avg_str = f".{int(round(split_avg * 1000)):03d}"
+            parts.append(f"{avg_str} {side}")
+
+    # Pitcher quality
     if ace:
         parts.append("facing ace")
-    elif p.era is not None:
-        parts.append(f"opp ERA {p.era:.2f}")
+    else:
+        eff = p.eff_era or p.era
+        if eff is not None:
+            parts.append(f"opp ERA {eff:.2f}")
+
+    # Star note
+    if hitter.ops is not None and hitter.ops >= 0.850:
+        ops_str = f".{int(round(hitter.ops * 1000)):03d}"
+        parts.append(f"star ({ops_str} OPS)")
+
+    # Park factor
+    if hitter.park_factor >= 1.05:
+        parts.append(f"hitter-friendly park (+{int(round((hitter.park_factor - 1) * 100))}%)")
+    elif hitter.park_factor <= 0.95:
+        parts.append(f"pitcher-friendly park ({int(round((hitter.park_factor - 1) * 100))}%)")
+
     if not parts:
         parts.append("no split data available")
     return ", ".join(parts)
@@ -128,6 +223,7 @@ def advise_roster(hitters: list[HitterInfo]) -> list[dict]:
         p = h.pitcher
         ace = is_ace(p) if p else False
         rec = recommend(score, active_scores, ace) if p else "Sit"
+        rec = _apply_star_protection(rec, h, ace)
 
         result.append({
             "player_id": h.player_id,
@@ -142,6 +238,8 @@ def advise_roster(hitters: list[HitterInfo]) -> list[dict]:
                 "throws": p.throws,
                 "era": p.era,
                 "whip": p.whip,
+                "eff_era": p.eff_era,
+                "eff_whip": p.eff_whip,
                 "is_ace": ace,
             } if p else None,
             "splits": h.splits,
@@ -149,6 +247,11 @@ def advise_roster(hitters: list[HitterInfo]) -> list[dict]:
             "score": round(score, 4),
             "recommendation": rec,
             "reason": build_reason(h, rec, ace),
+            "recent_avg": h.recent_avg,
+            "ops": h.ops,
+            "career_vs_pitcher": h.career_vs_pitcher,
+            "park_factor": round(h.park_factor, 2),
+            "is_home": h.is_home,
         })
 
     result.sort(key=lambda x: (

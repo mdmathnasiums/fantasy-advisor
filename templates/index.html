@@ -67,6 +67,8 @@
   .badge-lhp { background: rgba(26,86,160,0.25); color: #5b9bd5; border: 1px solid rgba(26,86,160,0.4); }
   .badge-rhp { background: rgba(186,117,23,0.25); color: #e8a030; border: 1px solid rgba(186,117,23,0.4); }
   .badge-bats { background: var(--surface2); color: var(--text-muted); border: 1px solid var(--border); font-size: 10px; padding: 1px 5px; }
+  .badge-hot { background: rgba(255,100,0,0.15); color: #ff7b29; border: 1px solid rgba(255,100,0,0.35); font-size: 10px; padding: 1px 5px; }
+  .badge-cold { background: rgba(100,149,237,0.15); color: #7aafff; border: 1px solid rgba(100,149,237,0.35); font-size: 10px; padding: 1px 5px; }
 
   /* Position tag */
   .pos-tag { display: inline-block; min-width: 28px; text-align: center; background: var(--surface2); color: var(--text-muted); border-radius: 4px; padding: 2px 6px; font-size: 12px; font-weight: 600; }
@@ -80,6 +82,7 @@
 
   /* Pitcher info line */
   .pitcher-line { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+  .pitcher-stats-line { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
   .pitcher-stat { color: var(--text); }
 
   /* Split bars */
@@ -237,6 +240,27 @@ function handBadge(hand, type) {
   return `<span class="badge badge-bats">${hand}</span>`;
 }
 
+function hotColdBadge(recentAvg) {
+  if (recentAvg == null) return '';
+  if (recentAvg >= 0.300) return `<span class="badge badge-hot">🔥 HOT</span>`;
+  if (recentAvg <= 0.180) return `<span class="badge badge-cold">❄️ COLD</span>`;
+  return '';
+}
+
+function fmtEra(p) {
+  if (!p) return '—';
+  const val = p.eff_era != null ? p.eff_era : p.era;
+  if (val == null) return '—';
+  return val.toFixed(2);
+}
+
+function fmtWhip(p) {
+  if (!p) return '—';
+  const val = p.eff_whip != null ? p.eff_whip : p.whip;
+  if (val == null) return '';
+  return val.toFixed(2);
+}
+
 function matchupPill(q) {
   if (q === 'good') return '<span class="matchup-pill matchup-good">Good</span>';
   if (q === 'bad') return '<span class="matchup-pill matchup-bad">Tough</span>';
@@ -307,10 +331,10 @@ function buildRow(player) {
   const throws = p?.throws;
   const matchupHtml = player.has_game ? `
     ${matchupPill(player.matchup_quality)}
-    ${p ? `<div class="pitcher-line">${esc(p.name)} ${handBadge(throws, 'pitcher')}
-      ${p.is_ace ? '<span class="ace-flag" title="Ace pitcher">&#9733;</span>' : ''}
-      <span class="pitcher-stat">${p.era != null ? p.era.toFixed(2) + ' ERA' : '—'}</span>
-      <span class="pitcher-stat"> ${p.whip != null ? p.whip.toFixed(2) + ' WHIP' : ''}</span>
+    ${p ? `<div class="pitcher-line">${esc(p.name)} ${handBadge(throws, 'pitcher')}${p.is_ace ? '<span class="ace-flag" title="Ace pitcher">&#9733;</span>' : ''}</div>
+    <div class="pitcher-stats-line">
+      <span class="pitcher-stat">${fmtEra(p)} ERA</span>
+      <span class="pitcher-stat"> &middot; ${fmtWhip(p)} WHIP</span>
     </div>` : ''}
   ` : `<span style="color:var(--text-muted);font-size:12px">No game</span>`;
 
@@ -324,7 +348,7 @@ function buildRow(player) {
   return `<tr class="${benchClass}" data-rec="${player.recommendation}" data-has-game="${player.has_game}">
     <td><span class="pos-tag">${esc(player.selected_position || player.position)}</span></td>
     <td>
-      <div><strong>${esc(player.full_name)}</strong> ${handBadge(player.bats, 'batter')}</div>
+      <div><strong>${esc(player.full_name)}</strong> ${handBadge(player.bats, 'batter')} ${hotColdBadge(player.recent_avg)}</div>
       <div style="font-size:11px;color:var(--text-muted)">${esc(player.team_abbr)} &middot; ${esc(player.position)}</div>
     </td>
     <td>${matchupHtml}</td>
