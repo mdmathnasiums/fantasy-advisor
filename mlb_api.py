@@ -201,47 +201,23 @@ async def search_player(name: str) -> int | None:
             resp.raise_for_status()
             data = resp.json()
         people = data.get("people", [])
-        return people[0].get("id") if people else None
-    except Exception:
+        mlb_id = people[0].get("id") if people else None
+        if mlb_id is None:
+            print(f"[mlb_api] search_player: no result for '{name}' (status={resp.status_code})")
+        return mlb_id
+    except Exception as exc:
+        print(f"[mlb_api] search_player: exception for '{name}': {exc}")
         return None
 
 
-async def _fetch_split_avgs(
-    client: httpx.AsyncClient, mlb_id: int, season: int
-) -> tuple[float | None, float | None]:
-    """Return (vL_avg, vR_avg) for the given season. Used for prior-year fallback."""
-    resp = await client.get(
-        f"{MLB_BASE}/people/{mlb_id}",
-        params={"hydrate": f"stats(group=hitting,type=statSplits,season={season})"},
-        timeout=10.0,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    person = data.get("people", [{}])[0]
-    vl_avg = vr_avg = None
-    for stat_group in person.get("stats", []):
+def _parse_stat_splits(stat_list: list) -> dict:
+    """Parse a MLB /stats direct endpoint response list into vL, vR, home_avg, away_avg."""
+    vl_avg = vr_avg = home_avg = away_avg = ops = None
+    for stat_group in stat_list:
         for split in stat_group.get("splits", []):
             code = split.get("split", {}).get("code", "")
-            avg_str = split.get("stat", {}).get("avg")
-            if avg_str:
-                try:
-                    avg = float(avg_str)
-                    if code == "vl":
-                        vl_avg = avg
-                    elif code == "vr":
-                        vr_avg = avg
-                except (ValueError, TypeError):
-                    pass
-    return vl_avg, vr_avg
-
-
-def _parse_splits_from_person(person: dict) -> dict:
-    """Extract vL, vR, home_avg, away_avg from a MLB statSplits response person object."""
-    vl_avg = vr_avg = home_avg = away_avg = None
-    for stat_group in person.get("stats", []):
-        for split in stat_group.get("splits", []):
-            code = split.get("split", {}).get("code", "")
-            avg_str = split.get("stat", {}).get("avg")
+            s = split.get("stat", {})
+            avg_str = s.get("avg")
             if avg_str:
                 try:
                     avg = float(avg_str)
@@ -255,125 +231,131 @@ def _parse_splits_from_person(person: dict) -> dict:
                         away_avg = avg
                 except (ValueError, TypeError):
                     pass
-    return {"vL": vl_avg, "vR": vr_avg, "home_avg": home_avg, "away_avg": away_avg}
-
-
-def _parse_ops_from_person(person: dict) -> float | None:
-    """Extract season OPS from a MLB season stats response person object."""
-    for sg in person.get("stats", []):
-        splits = sg.get("splits", [])
-        if splits:
-            ops_str = splits[0].get("stat", {}).get("ops")
-            if ops_str:
+            # season OPS lives here when stats=season is used
+            ops_str = s.get("ops")
+            if ops_str and not split.get("split", {}).get("code"):
                 try:
-                    return float(ops_str)
+                    ops = float(ops_str)
                 except (ValueError, TypeError):
                     pass
-    return None
+    return {"vL": vl_avg, "vR": vr_avg, "home_avg": home_avg, "away_avg": away_avg, "ops": ops}
+
+
+async def _get_stats_direct(
+    client: httpx.AsyncClient, mlb_id: int, stats_type: str, season: int
+) -> list:
+    """Call /people/{id}/stats directly. Returns the stats list or []."""
+    resp = await client.get(
+        f"{MLB_BASE}/people/{mlb_id}/stats",
+        params={"stats": stats_type, "group": "hitting", "season": season},
+        timeout=12.0,
+    )
+    resp.raise_for_status()
+    return resp.json().get("stats", [])
 
 
 async def get_hitter_details(mlb_id: int, season: int | None = None) -> dict:
     """Get batter's bat side, L/R splits, home/away splits, season OPS, and recent 7-day avg.
 
-    Before June 1: falls back to prior-season L/R splits and OPS if current season has none.
+    Uses /people/{id}/stats (direct endpoint) instead of hydrate — more reliable.
+    Before June 1: falls back to prior-season data when current season has none yet.
     """
     today = date.today()
     season = season or today.year
     use_fallback = today < date(today.year, 6, 1)
 
-    # Fetch current season data — three separate calls in parallel
     async with httpx.AsyncClient() as client:
-        splits_resp, season_resp, gamelog_resp = await asyncio.gather(
-            client.get(
-                f"{MLB_BASE}/people/{mlb_id}",
-                params={"hydrate": f"stats(group=hitting,type=statSplits,season={season})"},
-                timeout=10.0,
-            ),
-            client.get(
-                f"{MLB_BASE}/people/{mlb_id}",
-                params={"hydrate": f"stats(group=hitting,type=season,season={season})"},
-                timeout=10.0,
-            ),
-            client.get(
-                f"{MLB_BASE}/people/{mlb_id}",
-                params={"hydrate": f"stats(group=hitting,type=gameLog,season={season})"},
-                timeout=10.0,
-            ),
+        # bat side comes from the person record (not a stat)
+        person_resp, splits_stats, season_stats, gamelog_stats = await asyncio.gather(
+            client.get(f"{MLB_BASE}/people/{mlb_id}", timeout=10.0),
+            _get_stats_direct(client, mlb_id, "statSplits", season),
+            _get_stats_direct(client, mlb_id, "season", season),
+            _get_stats_direct(client, mlb_id, "gameLog", season),
+            return_exceptions=True,
         )
 
-    # --- Current season splits ---
-    splits_resp.raise_for_status()
-    person = splits_resp.json().get("people", [{}])[0]
-    bats = person.get("batSide", {}).get("code", "R")
-    split_data = _parse_splits_from_person(person)
-    vl_avg = split_data["vL"]
-    vr_avg = split_data["vR"]
-    home_avg = split_data["home_avg"]
-    away_avg = split_data["away_avg"]
-
-    # --- Current season OPS ---
-    ops = None
+    # --- Bat side ---
+    bats = "R"
     try:
-        season_resp.raise_for_status()
-        sp = season_resp.json().get("people", [{}])[0]
-        ops = _parse_ops_from_person(sp)
+        person_resp.raise_for_status()
+        bats = person_resp.json().get("people", [{}])[0].get("batSide", {}).get("code", "R")
     except Exception:
         pass
 
-    # Prior-season fallback (early in the year — before June 1)
-    if use_fallback and (vl_avg is None and vr_avg is None):
+    # --- Current season splits ---
+    splits_data = _parse_stat_splits(splits_stats if not isinstance(splits_stats, Exception) else [])
+    vl_avg = splits_data["vL"]
+    vr_avg = splits_data["vR"]
+    home_avg = splits_data["home_avg"]
+    away_avg = splits_data["away_avg"]
+
+    # --- OPS from season stats ---
+    ops = None
+    if not isinstance(season_stats, Exception):
+        for sg in season_stats:
+            for split in sg.get("splits", []):
+                ops_str = split.get("stat", {}).get("ops")
+                if ops_str:
+                    try:
+                        ops = float(ops_str)
+                    except (ValueError, TypeError):
+                        pass
+                    break
+            if ops is not None:
+                break
+
+    # --- Prior-season fallback (early in the year — before June 1) ---
+    if use_fallback and vl_avg is None and vr_avg is None:
         try:
             async with httpx.AsyncClient() as prior_client:
-                prior_splits_resp, prior_ops_resp = await asyncio.gather(
-                    prior_client.get(
-                        f"{MLB_BASE}/people/{mlb_id}",
-                        params={"hydrate": f"stats(group=hitting,type=statSplits,season={season - 1})"},
-                        timeout=10.0,
-                    ),
-                    prior_client.get(
-                        f"{MLB_BASE}/people/{mlb_id}",
-                        params={"hydrate": f"stats(group=hitting,type=season,season={season - 1})"},
-                        timeout=10.0,
-                    ),
+                prior_splits, prior_season = await asyncio.gather(
+                    _get_stats_direct(prior_client, mlb_id, "statSplits", season - 1),
+                    _get_stats_direct(prior_client, mlb_id, "season", season - 1),
+                    return_exceptions=True,
                 )
-            prior_splits_resp.raise_for_status()
-            prior_person = prior_splits_resp.json().get("people", [{}])[0]
-            prior_data = _parse_splits_from_person(prior_person)
-            vl_avg = prior_data["vL"]
-            vr_avg = prior_data["vR"]
-            home_avg = prior_data["home_avg"]
-            away_avg = prior_data["away_avg"]
-
-            if ops is None:
-                try:
-                    prior_ops_resp.raise_for_status()
-                    prior_sp = prior_ops_resp.json().get("people", [{}])[0]
-                    ops = _parse_ops_from_person(prior_sp)
-                except Exception:
-                    pass
+            if not isinstance(prior_splits, Exception):
+                prior_data = _parse_stat_splits(prior_splits)
+                vl_avg = prior_data["vL"]
+                vr_avg = prior_data["vR"]
+                home_avg = prior_data["home_avg"]
+                away_avg = prior_data["away_avg"]
+                print(f"[mlb_api] using {season - 1} splits for player {mlb_id}: vL={vl_avg} vR={vr_avg}")
+            if ops is None and not isinstance(prior_season, Exception):
+                for sg in prior_season:
+                    for split in sg.get("splits", []):
+                        ops_str = split.get("stat", {}).get("ops")
+                        if ops_str:
+                            try:
+                                ops = float(ops_str)
+                            except (ValueError, TypeError):
+                                pass
+                            break
+                    if ops is not None:
+                        break
         except Exception as exc:
             print(f"[mlb_api] prior-season fallback failed for {mlb_id}: {exc}")
+    else:
+        print(f"[mlb_api] {season} splits for player {mlb_id}: vL={vl_avg} vR={vr_avg} OPS={ops}")
 
     # --- Recent 7-day batting average ---
     recent_avg = None
     try:
-        gamelog_resp.raise_for_status()
-        gl = gamelog_resp.json().get("people", [{}])[0]
-        cutoff = today - timedelta(days=7)
-        hits = at_bats = 0
-        for sg in gl.get("stats", []):
-            for split in sg.get("splits", []):
-                game_date_str = split.get("date", "")
-                try:
-                    game_dt = date.fromisoformat(game_date_str)
-                except (ValueError, TypeError):
-                    continue
-                if game_dt >= cutoff:
-                    stat = split.get("stat", {})
-                    hits += int(stat.get("hits", 0))
-                    at_bats += int(stat.get("atBats", 0))
-        if at_bats >= 5:  # lower threshold since 7-day window is shorter
-            recent_avg = round(hits / at_bats, 3)
+        if not isinstance(gamelog_stats, Exception):
+            cutoff = today - timedelta(days=7)
+            hits = at_bats = 0
+            for sg in gamelog_stats:
+                for split in sg.get("splits", []):
+                    game_date_str = split.get("date", "")
+                    try:
+                        game_dt = date.fromisoformat(game_date_str)
+                    except (ValueError, TypeError):
+                        continue
+                    if game_dt >= cutoff:
+                        stat = split.get("stat", {})
+                        hits += int(stat.get("hits", 0))
+                        at_bats += int(stat.get("atBats", 0))
+            if at_bats >= 5:
+                recent_avg = round(hits / at_bats, 3)
     except Exception:
         pass
 
