@@ -1,8 +1,401 @@
 <!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"><title>Fantasy Baseball Advisor</title></head>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fantasy Baseball Advisor</title>
+<style>
+  :root {
+    --green: #639922;
+    --amber: #BA7517;
+    --red: #A32D2D;
+    --blue: #1a56a0;
+    --bg: #0f1923;
+    --surface: #1a2535;
+    --surface2: #243040;
+    --text: #e8edf2;
+    --text-muted: #8a9ab0;
+    --border: #2d3f55;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; min-height: 100vh; display: flex; flex-direction: column; }
+
+  /* Header */
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 20px; display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 18px; font-weight: 700; }
+  .header-date { color: var(--text-muted); font-size: 13px; margin-left: auto; }
+
+  /* Main layout */
+  main { flex: 1; padding: 16px 20px; max-width: 1100px; width: 100%; margin: 0 auto; }
+
+  /* League tabs */
+  .league-tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 2px solid var(--border); padding-bottom: 0; }
+  .tab-btn { background: none; border: none; color: var(--text-muted); padding: 8px 20px; cursor: pointer; font-size: 14px; font-weight: 500; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: color 0.15s; }
+  .tab-btn.active { color: var(--text); border-bottom-color: var(--green); }
+  .tab-btn:hover:not(.active) { color: var(--text); }
+
+  /* Summary cards */
+  .summary-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+  .card-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 6px; }
+  .card-value { font-size: 28px; font-weight: 700; }
+  .card-value.green { color: var(--green); }
+  .card-value.amber { color: var(--amber); }
+  .card-value.red { color: var(--red); }
+  .card-value.muted { color: var(--text-muted); }
+
+  /* Filter row */
+  .filter-row { display: flex; gap: 6px; margin-bottom: 12px; align-items: center; }
+  .filter-btn { background: var(--surface); border: 1px solid var(--border); color: var(--text-muted); padding: 5px 14px; border-radius: 20px; cursor: pointer; font-size: 13px; transition: all 0.15s; }
+  .filter-btn.active { background: var(--surface2); color: var(--text); border-color: var(--text-muted); }
+  .filter-btn.active.f-start { background: rgba(99,153,34,0.15); border-color: var(--green); color: var(--green); }
+  .filter-btn.active.f-sit { background: rgba(163,45,45,0.15); border-color: var(--red); color: var(--red); }
+  .filter-btn.active.f-flex { background: rgba(186,117,23,0.15); border-color: var(--amber); color: var(--amber); }
+  .filter-count { color: var(--text-muted); font-size: 12px; margin-left: 4px; }
+
+  /* Table */
+  .table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  table { width: 100%; border-collapse: collapse; }
+  thead th { background: var(--surface2); padding: 10px 12px; text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); font-weight: 600; white-space: nowrap; }
+  tbody tr { border-top: 1px solid var(--border); transition: background 0.1s; }
+  tbody tr:hover { background: var(--surface2); }
+  tbody tr.bench-row { opacity: 0.5; }
+  td { padding: 10px 12px; vertical-align: middle; }
+
+  /* Badges */
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+  .badge-lhp { background: rgba(26,86,160,0.25); color: #5b9bd5; border: 1px solid rgba(26,86,160,0.4); }
+  .badge-rhp { background: rgba(186,117,23,0.25); color: #e8a030; border: 1px solid rgba(186,117,23,0.4); }
+  .badge-bats { background: var(--surface2); color: var(--text-muted); border: 1px solid var(--border); font-size: 10px; padding: 1px 5px; }
+
+  /* Position tag */
+  .pos-tag { display: inline-block; min-width: 28px; text-align: center; background: var(--surface2); color: var(--text-muted); border-radius: 4px; padding: 2px 6px; font-size: 12px; font-weight: 600; }
+
+  /* Matchup pill */
+  .matchup-pill { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .matchup-good { background: rgba(99,153,34,0.15); color: var(--green); border: 1px solid rgba(99,153,34,0.3); }
+  .matchup-ok { background: rgba(138,154,176,0.1); color: var(--text-muted); border: 1px solid var(--border); }
+  .matchup-bad { background: rgba(163,45,45,0.15); color: var(--red); border: 1px solid rgba(163,45,45,0.3); }
+  .ace-flag { color: #f5c842; font-size: 13px; margin-left: 4px; }
+
+  /* Pitcher info line */
+  .pitcher-line { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+  .pitcher-stat { color: var(--text); }
+
+  /* Split bars */
+  .splits-col { min-width: 120px; }
+  .split-row { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+  .split-label { font-size: 10px; color: var(--text-muted); width: 16px; text-align: right; flex-shrink: 0; }
+  .split-bar-bg { flex: 1; height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+  .split-bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
+  .split-bar-fill.good { background: var(--green); }
+  .split-bar-fill.ok { background: var(--amber); }
+  .split-bar-fill.low { background: var(--red); }
+  .split-avg { font-size: 11px; width: 34px; text-align: right; flex-shrink: 0; }
+
+  /* Recommendation tag */
+  .rec-tag { display: inline-block; padding: 3px 10px; border-radius: 4px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+  .rec-start { background: rgba(99,153,34,0.2); color: var(--green); border: 1px solid rgba(99,153,34,0.4); }
+  .rec-sit { background: rgba(163,45,45,0.2); color: var(--red); border: 1px solid rgba(163,45,45,0.4); }
+  .rec-flex { background: rgba(186,117,23,0.2); color: var(--amber); border: 1px solid rgba(186,117,23,0.4); }
+  .rec-nogame { background: var(--surface2); color: var(--text-muted); border: 1px solid var(--border); }
+
+  /* Active toggle */
+  .toggle { position: relative; display: inline-block; width: 34px; height: 18px; cursor: pointer; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider { position: absolute; inset: 0; background: var(--surface2); border: 1px solid var(--border); border-radius: 18px; transition: 0.2s; }
+  .toggle-slider:before { content: ""; position: absolute; width: 12px; height: 12px; left: 2px; top: 2px; background: var(--text-muted); border-radius: 50%; transition: 0.2s; }
+  .toggle input:checked + .toggle-slider { background: rgba(99,153,34,0.2); border-color: var(--green); }
+  .toggle input:checked + .toggle-slider:before { transform: translateX(16px); background: var(--green); }
+
+  /* Loading / error states */
+  .loading { text-align: center; padding: 40px; color: var(--text-muted); }
+  .error-msg { background: rgba(163,45,45,0.1); border: 1px solid rgba(163,45,45,0.3); color: var(--red); padding: 12px 16px; border-radius: 6px; margin-bottom: 16px; }
+
+  /* Footer */
+  footer { background: var(--surface); border-top: 1px solid var(--border); padding: 10px 20px; display: flex; gap: 10px; align-items: center; }
+  .footer-btn { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 7px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: background 0.15s; }
+  .footer-btn:hover:not(:disabled) { background: #2d3f55; }
+  .footer-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  @media (max-width: 700px) {
+    .summary-cards { grid-template-columns: repeat(2, 1fr); }
+    .splits-col { display: none; }
+  }
+</style>
+</head>
 <body>
+
+<header>
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#639922" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><line x1="2" y1="12" x2="22" y2="12"/></svg>
   <h1>Fantasy Baseball Advisor</h1>
-  <p>Loading...</p>
+  <span class="header-date" id="header-date"></span>
+</header>
+
+<main>
+  <div id="error-container"></div>
+
+  <div class="league-tabs" id="league-tabs"></div>
+
+  <div class="summary-cards">
+    <div class="card">
+      <div class="card-label">Active Hitters</div>
+      <div class="card-value" id="stat-active">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Strong Matchups</div>
+      <div class="card-value green" id="stat-strong">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Tough Matchups</div>
+      <div class="card-value red" id="stat-tough">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">No Game Today</div>
+      <div class="card-value muted" id="stat-nogame">—</div>
+    </div>
+  </div>
+
+  <div class="filter-row">
+    <button class="filter-btn active" data-filter="all">All</button>
+    <button class="filter-btn f-start" data-filter="Start">Start</button>
+    <button class="filter-btn f-sit" data-filter="Sit">Sit</button>
+    <button class="filter-btn f-flex" data-filter="Flex">Flex</button>
+    <span class="filter-count" id="filter-count"></span>
+  </div>
+
+  <div class="table-wrap">
+    <div class="loading" id="loading">Loading roster data…</div>
+    <table id="main-table" style="display:none">
+      <thead>
+        <tr>
+          <th>Pos</th>
+          <th>Player</th>
+          <th>Matchup</th>
+          <th class="splits-col">Splits</th>
+          <th>Rec</th>
+          <th>Active</th>
+        </tr>
+      </thead>
+      <tbody id="table-body"></tbody>
+    </table>
+  </div>
+</main>
+
+<footer>
+  <button class="footer-btn">Waiver Suggestions</button>
+  <button class="footer-btn" disabled title="Coming in v2">Push Lineup to Yahoo</button>
+</footer>
+
+<script>
+let allData = [];
+let activeLeagueId = null;
+let activeFilter = 'all';
+
+function fmtAvg(v) {
+  if (v == null) return '—';
+  return v.toFixed(3).replace(/^0/, '');
+}
+
+function splitBarPct(avg) {
+  if (avg == null) return 0;
+  const pct = (avg - 0.150) / (0.400 - 0.150) * 100;
+  return Math.min(100, Math.max(0, pct));
+}
+
+function splitBarClass(avg) {
+  if (avg == null) return 'ok';
+  if (avg >= 0.270) return 'good';
+  if (avg <= 0.230) return 'low';
+  return 'ok';
+}
+
+function recClass(rec) {
+  if (rec === 'Start') return 'rec-start';
+  if (rec === 'Sit') return 'rec-sit';
+  if (rec === 'Flex') return 'rec-flex';
+  return 'rec-nogame';
+}
+
+function handBadge(hand, type) {
+  if (!hand) return '';
+  if (type === 'pitcher') {
+    const cls = hand === 'L' ? 'badge-lhp' : 'badge-rhp';
+    return `<span class="badge ${cls}">${hand}HP</span>`;
+  }
+  return `<span class="badge badge-bats">${hand}</span>`;
+}
+
+function matchupClass(q) {
+  if (q === 'good') return 'matchup-good';
+  if (q === 'bad') return 'matchup-bad';
+  return 'matchup-ok';
+}
+
+function matchupLabel(q) {
+  if (q === 'good') return 'Good';
+  if (q === 'bad') return 'Tough';
+  return 'OK';
+}
+
+function getLeagueData() {
+  return allData.find(l => l.league_id === activeLeagueId) || null;
+}
+
+function renderTabs() {
+  const container = document.getElementById('league-tabs');
+  container.innerHTML = allData.map(l => `
+    <button class="tab-btn ${l.league_id === activeLeagueId ? 'active' : ''}"
+            data-id="${l.league_id}">${l.league_name}</button>
+  `).join('');
+  container.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      activeLeagueId = btn.dataset.id;
+      renderTabs();
+      renderAll();
+    });
+  });
+}
+
+function renderStats(league) {
+  if (!league || league.error) {
+    ['active', 'strong', 'tough', 'nogame'].forEach(k =>
+      document.getElementById(`stat-${k}`).textContent = '—'
+    );
+    return;
+  }
+  const s = league.stats;
+  document.getElementById('stat-active').textContent = s.active_hitters;
+  document.getElementById('stat-strong').textContent = s.strong_matchups;
+  document.getElementById('stat-tough').textContent = s.tough_matchups;
+  document.getElementById('stat-nogame').textContent = s.no_game;
+}
+
+function buildSplitBars(splits, pitcherThrows) {
+  const vL = splits?.vL;
+  const vR = splits?.vR;
+  const highlight = pitcherThrows;
+
+  function row(label, avg) {
+    const isActive = label === highlight;
+    const pct = splitBarPct(avg);
+    const cls = splitBarClass(avg);
+    const style = isActive ? '' : 'opacity:0.5';
+    return `
+      <div class="split-row" style="${style}">
+        <span class="split-label">${label}</span>
+        <div class="split-bar-bg">
+          <div class="split-bar-fill ${cls}" style="width:${pct}%"></div>
+        </div>
+        <span class="split-avg">${fmtAvg(avg)}</span>
+      </div>`;
+  }
+
+  return row('vL', vL) + row('vR', vR);
+}
+
+function buildRow(player) {
+  const p = player.pitcher;
+  const throws = p?.throws;
+  const matchupHtml = player.has_game ? `
+    <span class="matchup-pill ${matchupClass(player.matchup_quality)}">${matchupLabel(player.matchup_quality)}</span>
+    ${p ? `<div class="pitcher-line">${p.name} ${handBadge(throws, 'pitcher')}
+      ${p.is_ace ? '<span class="ace-flag" title="Ace pitcher">&#9733;</span>' : ''}
+      <span class="pitcher-stat">${p.era != null ? p.era.toFixed(2) + ' ERA' : '—'}</span>
+      <span class="pitcher-stat"> ${p.whip != null ? p.whip.toFixed(2) + ' WHIP' : ''}</span>
+    </div>` : ''}
+  ` : `<span style="color:var(--text-muted);font-size:12px">No game</span>`;
+
+  const recHtml = player.has_game
+    ? `<span class="rec-tag ${recClass(player.recommendation)}">${player.recommendation}</span>`
+    : `<span class="rec-tag rec-nogame">No Game</span>`;
+
+  const benchClass = player.selected_position === 'BN' ? ' bench-row' : '';
+
+  return `<tr class="${benchClass}" data-rec="${player.recommendation}" data-has-game="${player.has_game}">
+    <td><span class="pos-tag">${player.selected_position || player.position}</span></td>
+    <td>
+      <div><strong>${player.full_name}</strong> ${handBadge(player.bats, 'batter')}</div>
+      <div style="font-size:11px;color:var(--text-muted)">${player.team_abbr} &middot; ${player.position}</div>
+    </td>
+    <td>${matchupHtml}</td>
+    <td class="splits-col">${buildSplitBars(player.splits, throws)}</td>
+    <td>${recHtml}</td>
+    <td>
+      <label class="toggle">
+        <input type="checkbox" ${player.selected_position !== 'BN' ? 'checked' : ''} disabled>
+        <span class="toggle-slider"></span>
+      </label>
+    </td>
+  </tr>`;
+}
+
+function renderTable(league) {
+  const table = document.getElementById('main-table');
+  const loading = document.getElementById('loading');
+  const tbody = document.getElementById('table-body');
+  const countEl = document.getElementById('filter-count');
+
+  if (!league || league.error) {
+    loading.style.display = 'block';
+    loading.textContent = league?.error || 'No data';
+    table.style.display = 'none';
+    return;
+  }
+
+  let players = league.players || [];
+  if (activeFilter !== 'all') {
+    players = players.filter(p => p.recommendation === activeFilter);
+  }
+
+  tbody.innerHTML = players.map(buildRow).join('');
+  countEl.textContent = `${players.length} players`;
+  loading.style.display = 'none';
+  table.style.display = '';
+}
+
+function renderAll() {
+  const league = getLeagueData();
+  renderStats(league);
+  renderTable(league);
+}
+
+document.querySelectorAll('.filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    activeFilter = btn.dataset.filter;
+    renderAll();
+  });
+});
+
+async function init() {
+  const today = new Date();
+  document.getElementById('header-date').textContent =
+    today.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+
+  try {
+    const resp = await fetch('/api/today');
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    allData = await resp.json();
+  } catch (err) {
+    document.getElementById('error-container').innerHTML =
+      `<div class="error-msg">Failed to load data: ${err.message}. Check that Yahoo auth is configured.</div>`;
+    document.getElementById('loading').textContent = 'Error loading data.';
+    return;
+  }
+
+  if (!allData.length) {
+    document.getElementById('loading').textContent = 'No leagues found.';
+    return;
+  }
+
+  activeLeagueId = allData[0].league_id;
+  renderTabs();
+  renderAll();
+}
+
+init();
+</script>
 </body>
 </html>
