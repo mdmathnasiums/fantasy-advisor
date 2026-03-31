@@ -1,6 +1,12 @@
 # advisor.py
 from dataclasses import dataclass
 
+POSITION_ORDER = {
+    "C": 0, "1B": 1, "2B": 2, "3B": 3, "SS": 4,
+    "CI": 5, "MI": 6, "OF": 7, "Util": 8, "UTIL": 8,
+    "BN": 99, "IL": 100, "IL+": 101,
+}
+
 
 @dataclass
 class PitcherInfo:
@@ -90,6 +96,28 @@ def recommend(score: float, all_scores: list[float], is_ace_pitcher: bool) -> st
     return rec
 
 
+def build_reason(hitter: HitterInfo, rec: str, ace: bool) -> str:
+    """One-line explanation of the recommendation."""
+    if hitter.pitcher is None:
+        return "No game scheduled today"
+    p = hitter.pitcher
+    throws = p.throws
+    split_avg = hitter.splits.get("vL") if throws == "L" else hitter.splits.get("vR")
+    side = "vL" if throws == "L" else "vR"
+
+    parts = []
+    if split_avg is not None:
+        avg_str = f".{int(round(split_avg * 1000)):03d}"
+        parts.append(f"{avg_str} {side}")
+    if ace:
+        parts.append("facing ace")
+    elif p.era is not None:
+        parts.append(f"opp ERA {p.era:.2f}")
+    if not parts:
+        parts.append("no split data available")
+    return ", ".join(parts)
+
+
 def advise_roster(hitters: list[HitterInfo]) -> list[dict]:
     scores = {h.player_id: score_hitter(h) for h in hitters}
     active_scores = [scores[h.player_id] for h in hitters if h.pitcher is not None]
@@ -120,7 +148,11 @@ def advise_roster(hitters: list[HitterInfo]) -> list[dict]:
             "matchup_quality": get_matchup_quality(h),
             "score": round(score, 4),
             "recommendation": rec,
+            "reason": build_reason(h, rec, ace),
         })
 
-    result.sort(key=lambda x: x["score"], reverse=True)
+    result.sort(key=lambda x: (
+        POSITION_ORDER.get(x["selected_position"], 9),
+        -x["score"],
+    ))
     return result

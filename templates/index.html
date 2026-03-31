@@ -118,9 +118,16 @@
   .footer-btn:hover:not(:disabled) { background: #2d3f55; }
   .footer-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+  /* Reason blurb */
+  .reason-text { font-size: 11px; color: var(--text-muted); margin-top: 3px; font-style: italic; }
+
   @media (max-width: 700px) {
     .summary-cards { grid-template-columns: repeat(2, 1fr); }
     .splits-col { display: none; }
+    .active-col { display: none; }
+    .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    td, th { padding: 8px 8px; }
+    main { padding: 12px 10px; }
   }
 </style>
 </head>
@@ -174,7 +181,7 @@
           <th>Matchup</th>
           <th class="splits-col">Splits</th>
           <th>Rec</th>
-          <th>Active</th>
+          <th class="active-col">Active</th>
         </tr>
       </thead>
       <tbody id="table-body"></tbody>
@@ -230,16 +237,10 @@ function handBadge(hand, type) {
   return `<span class="badge badge-bats">${hand}</span>`;
 }
 
-function matchupClass(q) {
-  if (q === 'good') return 'matchup-good';
-  if (q === 'bad') return 'matchup-bad';
-  return 'matchup-ok';
-}
-
-function matchupLabel(q) {
-  if (q === 'good') return 'Good';
-  if (q === 'bad') return 'Tough';
-  return 'OK';
+function matchupPill(q) {
+  if (q === 'good') return '<span class="matchup-pill matchup-good">Good</span>';
+  if (q === 'bad') return '<span class="matchup-pill matchup-bad">Tough</span>';
+  return '';  // no pill for neutral matchups
 }
 
 function getLeagueData() {
@@ -305,7 +306,7 @@ function buildRow(player) {
   const p = player.pitcher;
   const throws = p?.throws;
   const matchupHtml = player.has_game ? `
-    <span class="matchup-pill ${matchupClass(player.matchup_quality)}">${matchupLabel(player.matchup_quality)}</span>
+    ${matchupPill(player.matchup_quality)}
     ${p ? `<div class="pitcher-line">${esc(p.name)} ${handBadge(throws, 'pitcher')}
       ${p.is_ace ? '<span class="ace-flag" title="Ace pitcher">&#9733;</span>' : ''}
       <span class="pitcher-stat">${p.era != null ? p.era.toFixed(2) + ' ERA' : '—'}</span>
@@ -314,13 +315,14 @@ function buildRow(player) {
   ` : `<span style="color:var(--text-muted);font-size:12px">No game</span>`;
 
   const recHtml = player.has_game
-    ? `<span class="rec-tag ${recClass(player.recommendation)}">${player.recommendation}</span>`
+    ? `<span class="rec-tag ${recClass(player.recommendation)}">${esc(player.recommendation)}</span>
+       ${player.reason ? `<div class="reason-text">${esc(player.reason)}</div>` : ''}`
     : `<span class="rec-tag rec-nogame">No Game</span>`;
 
   const benchClass = player.selected_position === 'BN' ? ' bench-row' : '';
 
   return `<tr class="${benchClass}" data-rec="${player.recommendation}" data-has-game="${player.has_game}">
-    <td><span class="pos-tag">${player.selected_position || player.position}</span></td>
+    <td><span class="pos-tag">${esc(player.selected_position || player.position)}</span></td>
     <td>
       <div><strong>${esc(player.full_name)}</strong> ${handBadge(player.bats, 'batter')}</div>
       <div style="font-size:11px;color:var(--text-muted)">${esc(player.team_abbr)} &middot; ${esc(player.position)}</div>
@@ -328,7 +330,7 @@ function buildRow(player) {
     <td>${matchupHtml}</td>
     <td class="splits-col">${buildSplitBars(player.splits, throws)}</td>
     <td>${recHtml}</td>
-    <td>
+    <td class="active-col">
       <label class="toggle">
         <input type="checkbox" ${player.selected_position !== 'BN' ? 'checked' : ''} disabled>
         <span class="toggle-slider"></span>
