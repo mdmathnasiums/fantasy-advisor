@@ -124,6 +124,9 @@
   /* Reason blurb */
   .reason-text { font-size: 11px; color: var(--text-muted); margin-top: 3px; font-style: italic; }
 
+  /* Rec legend */
+  .rec-legend { font-size: 11px; color: var(--text-muted); margin-bottom: 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+
   @media (max-width: 700px) {
     .summary-cards { grid-template-columns: repeat(2, 1fr); }
     .splits-col { display: none; }
@@ -172,6 +175,12 @@
     <button class="filter-btn f-sit" data-filter="Sit">Sit</button>
     <button class="filter-btn f-flex" data-filter="Flex">Flex</button>
     <span class="filter-count" id="filter-count"></span>
+  </div>
+
+  <div class="rec-legend">
+    <span class="rec-tag rec-start" style="font-size:11px;padding:2px 7px">Start</span> top 40% of matchups &nbsp;
+    <span class="rec-tag rec-flex" style="font-size:11px;padding:2px 7px">Flex</span> middle — start if you need the AB &nbsp;
+    <span class="rec-tag rec-sit" style="font-size:11px;padding:2px 7px">Sit</span> bottom 25% — bench if you have a better option
   </div>
 
   <div class="table-wrap">
@@ -242,9 +251,22 @@ function handBadge(hand, type) {
 
 function hotColdBadge(recentAvg) {
   if (recentAvg == null) return '';
-  if (recentAvg >= 0.300) return `<span class="badge badge-hot">🔥 HOT</span>`;
-  if (recentAvg <= 0.180) return `<span class="badge badge-cold">❄️ COLD</span>`;
+  const avg = fmtAvg(recentAvg);
+  if (recentAvg >= 0.300) return `<span class="badge badge-hot" title="Last 7 days: ${avg}">🔥 ${avg} L7</span>`;
+  if (recentAvg <= 0.180) return `<span class="badge badge-cold" title="Last 7 days: ${avg}">❄️ ${avg} L7</span>`;
   return '';
+}
+
+function scoreBreakdownTitle(bd) {
+  if (!bd) return '';
+  return [
+    `Split (${bd.split_source}): ${bd.split_avg_used} × 3.0 = ${bd.split_component}`,
+    `ERA (${bd.era_source}): ${bd.era_used} → ${bd.era_component}`,
+    `WHIP (${bd.whip_source}): ${bd.whip_used} → ${bd.whip_component}`,
+    bd.streak_modifier !== 1.0 ? `Streak modifier: ×${bd.streak_modifier}` : null,
+    bd.park_factor !== 1.0 ? `Park factor: ×${bd.park_factor}` : null,
+    `Total score: ${bd.total}`,
+  ].filter(Boolean).join('\n');
 }
 
 function fmtEra(p) {
@@ -339,7 +361,7 @@ function buildRow(player) {
   ` : `<span style="color:var(--text-muted);font-size:12px">No game</span>`;
 
   const recHtml = player.has_game
-    ? `<span class="rec-tag ${recClass(player.recommendation)}">${esc(player.recommendation)}</span>
+    ? `<span class="rec-tag ${recClass(player.recommendation)}" title="${scoreBreakdownTitle(player.score_breakdown)}">${esc(player.recommendation)}</span>
        ${player.reason ? `<div class="reason-text">${esc(player.reason)}</div>` : ''}`
     : `<span class="rec-tag rec-nogame">No Game</span>`;
 

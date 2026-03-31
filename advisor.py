@@ -47,56 +47,81 @@ def is_ace(pitcher: PitcherInfo) -> bool:
     return False
 
 
-def score_hitter(hitter: HitterInfo) -> float:
+def score_hitter(hitter: HitterInfo) -> tuple[float, dict]:
     """
-    Score components:
-      - Split avg vs pitcher handedness (or career vs pitcher if ≥10 PA): weight 3.0
-      - Blended with home/away split (70% L/R, 30% home/away) when available
-      - Opponent effective ERA (60% recent + 40% season): weight 2.0
-      - Opponent effective WHIP: weight 1.5
-      - Hot/cold modifier: ±10% based on last 14 days
-      - Park factor multiplier
+    Returns (score, breakdown) where breakdown shows each component's contribution.
+
+    Weights:
+      - Split avg (L/R vs pitcher hand, or career vs this pitcher): ×3.0
+        → blended 70/30 with home/away avg when available
+        → default .250 league-avg if no data
+      - 1/effective ERA: ×2.0  (default assumes ERA 4.50)
+      - 1/effective WHIP: ×1.5 (default assumes WHIP 1.30)
+      - Hot/cold modifier: ±8% if last 7 days ≥.300 or ≤.180
+      - Park factor: ±0–6% multiplier on total score
     """
     if hitter.pitcher is None:
-        return 0.0
+        return 0.0, {}
     p = hitter.pitcher
 
     # Best available split avg
+    split_source = "default"
     if hitter.career_vs_pitcher is not None:
         split_avg = hitter.career_vs_pitcher["avg"]
+        split_source = f"career vs pitcher ({hitter.career_vs_pitcher['pa']} PA)"
     else:
         split_avg = (
             hitter.splits.get("vL") if p.throws == "L" else hitter.splits.get("vR")
         )
+        split_source = ("vL" if p.throws == "L" else "vR") if split_avg is not None else "default (.250)"
 
-    # Blend home/away context into the split avg
+    # Blend home/away context (70% L/R, 30% home/away)
     home_away_avg = hitter.splits.get("home_avg" if hitter.is_home else "away_avg")
     if split_avg is not None and home_away_avg is not None:
         split_avg = split_avg * 0.7 + home_away_avg * 0.3
     elif home_away_avg is not None and split_avg is None:
         split_avg = home_away_avg
+        split_source = "home/away avg"
 
-    # Use effective (blended) ERA/WHIP, fall back to season, then league average
+    final_split = split_avg if split_avg is not None else 0.250
+
+    # Effective ERA/WHIP (60% recent 3 starts + 40% season), with league-avg fallback
     era_val = p.eff_era if p.eff_era and p.eff_era > 0 else (p.era if p.era and p.era > 0 else None)
     whip_val = p.eff_whip if p.eff_whip and p.eff_whip > 0 else (p.whip if p.whip and p.whip > 0 else None)
     era = era_val if era_val else 4.50
     whip = whip_val if whip_val else 1.30
 
-    score = (split_avg if split_avg is not None else 0.250) * 3.0
-    score += (1.0 / era) * 2.0
-    score += (1.0 / whip) * 1.5
+    split_component = final_split * 3.0
+    era_component = (1.0 / era) * 2.0
+    whip_component = (1.0 / whip) * 1.5
+    base_score = split_component + era_component + whip_component
 
-    # Hot/cold streak modifier
+    # Hot/cold modifier (±8% based on last 7 days)
+    streak_modifier = 1.0
     if hitter.recent_avg is not None:
         if hitter.recent_avg >= 0.300:
-            score *= 1.10
+            streak_modifier = 1.08
         elif hitter.recent_avg <= 0.180:
-            score *= 0.90
+            streak_modifier = 0.92
 
-    # Park factor
-    score *= hitter.park_factor
+    score = base_score * streak_modifier * hitter.park_factor
 
-    return score
+    breakdown = {
+        "split_avg_used": round(final_split, 3),
+        "split_source": split_source,
+        "split_component": round(split_component, 3),
+        "era_used": round(era, 2),
+        "era_source": "effective (blended)" if era_val and p.recent_era else ("season" if era_val else "default (4.50)"),
+        "era_component": round(era_component, 3),
+        "whip_used": round(whip, 2),
+        "whip_source": "effective (blended)" if whip_val and p.recent_whip else ("season" if whip_val else "default (1.30)"),
+        "whip_component": round(whip_component, 3),
+        "streak_modifier": round(streak_modifier, 2),
+        "park_factor": round(hitter.park_factor, 2),
+        "total": round(score, 4),
+    }
+
+    return score, breakdown
 
 
 def get_matchup_quality(hitter: HitterInfo) -> str:
@@ -214,7 +239,9 @@ def build_reason(hitter: HitterInfo, rec: str, ace: bool) -> str:
 
 
 def advise_roster(hitters: list[HitterInfo]) -> list[dict]:
-    scores = {h.player_id: score_hitter(h) for h in hitters}
+    score_results = {h.player_id: score_hitter(h) for h in hitters}
+    scores = {pid: sr[0] for pid, sr in score_results.items()}
+    breakdowns = {pid: sr[1] for pid, sr in score_results.items()}
     active_scores = [scores[h.player_id] for h in hitters if h.pitcher is not None]
 
     result = []
@@ -247,6 +274,7 @@ def advise_roster(hitters: list[HitterInfo]) -> list[dict]:
             "score": round(score, 4),
             "recommendation": rec,
             "reason": build_reason(h, rec, ace),
+            "score_breakdown": breakdowns[h.player_id],
             "recent_avg": h.recent_avg,
             "ops": h.ops,
             "career_vs_pitcher": h.career_vs_pitcher,

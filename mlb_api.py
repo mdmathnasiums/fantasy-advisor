@@ -4,14 +4,15 @@ import httpx
 
 MLB_BASE = "https://statsapi.mlb.com/api/v1"
 
-# Park run-scoring factors by home team abbreviation (>1 = hitter-friendly)
+# Park run-scoring factors by home team abbreviation (>1 = hitter-friendly).
+# Range kept tight (±6%) so park doesn't overwhelm splits/pitcher quality.
 PARK_FACTORS: dict[str, float] = {
-    "COL": 1.15, "CIN": 1.08, "BAL": 1.07, "PHI": 1.06, "BOS": 1.05,
-    "TEX": 1.04, "NYY": 1.03, "MIL": 1.02, "TOR": 1.01, "ATL": 1.01,
-    "CHC": 1.00, "STL": 1.00, "WSH": 1.00, "DET": 1.00, "MIN": 0.99,
-    "CLE": 0.99, "PIT": 0.99, "HOU": 0.98, "ARI": 0.98, "LAA": 0.97,
-    "SEA": 0.96, "MIA": 0.96, "NYM": 0.96, "TB":  0.96, "OAK": 0.96,
-    "SD":  0.95, "CWS": 0.95, "KC":  0.95, "LAD": 0.94, "SF":  0.92,
+    "COL": 1.06, "CIN": 1.04, "BAL": 1.03, "PHI": 1.03, "BOS": 1.02,
+    "TEX": 1.02, "NYY": 1.01, "MIL": 1.01, "TOR": 1.01, "ATL": 1.01,
+    "CHC": 1.00, "STL": 1.00, "WSH": 1.00, "DET": 1.00, "MIN": 1.00,
+    "CLE": 0.99, "PIT": 0.99, "HOU": 0.99, "ARI": 0.99, "LAA": 0.99,
+    "SEA": 0.98, "MIA": 0.98, "NYM": 0.98, "TB":  0.98, "OAK": 0.98,
+    "SD":  0.97, "CWS": 0.97, "KC":  0.97, "LAD": 0.97, "SF":  0.94,
 }
 
 
@@ -234,15 +235,53 @@ async def _fetch_split_avgs(
     return vl_avg, vr_avg
 
 
-async def get_hitter_details(mlb_id: int, season: int | None = None) -> dict:
-    """Get batter's bat side, L/R splits, home/away splits, season OPS, and recent 14-day avg.
+def _parse_splits_from_person(person: dict) -> dict:
+    """Extract vL, vR, home_avg, away_avg from a MLB statSplits response person object."""
+    vl_avg = vr_avg = home_avg = away_avg = None
+    for stat_group in person.get("stats", []):
+        for split in stat_group.get("splits", []):
+            code = split.get("split", {}).get("code", "")
+            avg_str = split.get("stat", {}).get("avg")
+            if avg_str:
+                try:
+                    avg = float(avg_str)
+                    if code == "vl":
+                        vl_avg = avg
+                    elif code == "vr":
+                        vr_avg = avg
+                    elif code == "h":
+                        home_avg = avg
+                    elif code == "a":
+                        away_avg = avg
+                except (ValueError, TypeError):
+                    pass
+    return {"vL": vl_avg, "vR": vr_avg, "home_avg": home_avg, "away_avg": away_avg}
 
-    Before June 1: falls back to prior-season L/R splits if current season has none yet.
+
+def _parse_ops_from_person(person: dict) -> float | None:
+    """Extract season OPS from a MLB season stats response person object."""
+    for sg in person.get("stats", []):
+        splits = sg.get("splits", [])
+        if splits:
+            ops_str = splits[0].get("stat", {}).get("ops")
+            if ops_str:
+                try:
+                    return float(ops_str)
+                except (ValueError, TypeError):
+                    pass
+    return None
+
+
+async def get_hitter_details(mlb_id: int, season: int | None = None) -> dict:
+    """Get batter's bat side, L/R splits, home/away splits, season OPS, and recent 7-day avg.
+
+    Before June 1: falls back to prior-season L/R splits and OPS if current season has none.
     """
     today = date.today()
     season = season or today.year
     use_fallback = today < date(today.year, 6, 1)
 
+    # Fetch current season data — three separate calls in parallel
     async with httpx.AsyncClient() as client:
         splits_resp, season_resp, gamelog_resp = await asyncio.gather(
             client.get(
@@ -262,61 +301,65 @@ async def get_hitter_details(mlb_id: int, season: int | None = None) -> dict:
             ),
         )
 
+    # --- Current season splits ---
     splits_resp.raise_for_status()
-
-    # --- L/R and home/away splits ---
     person = splits_resp.json().get("people", [{}])[0]
     bats = person.get("batSide", {}).get("code", "R")
-    vl_avg = vr_avg = home_avg = away_avg = None
-    for stat_group in person.get("stats", []):
-        for split in stat_group.get("splits", []):
-            code = split.get("split", {}).get("code", "")
-            avg_str = split.get("stat", {}).get("avg")
-            if avg_str:
-                try:
-                    avg = float(avg_str)
-                    if code == "vl":
-                        vl_avg = avg
-                    elif code == "vr":
-                        vr_avg = avg
-                    elif code == "h":
-                        home_avg = avg
-                    elif code == "a":
-                        away_avg = avg
-                except (ValueError, TypeError):
-                    pass
+    split_data = _parse_splits_from_person(person)
+    vl_avg = split_data["vL"]
+    vr_avg = split_data["vR"]
+    home_avg = split_data["home_avg"]
+    away_avg = split_data["away_avg"]
 
-    # Prior-season L/R fallback (early in the year)
-    if use_fallback and vl_avg is None and vr_avg is None:
-        try:
-            async with httpx.AsyncClient() as client:
-                prior_vl, prior_vr = await _fetch_split_avgs(client, mlb_id, season - 1)
-            vl_avg = prior_vl
-            vr_avg = prior_vr
-        except Exception:
-            pass
-
-    # --- Season OPS ---
+    # --- Current season OPS ---
     ops = None
     try:
         season_resp.raise_for_status()
         sp = season_resp.json().get("people", [{}])[0]
-        for sg in sp.get("stats", []):
-            splits = sg.get("splits", [])
-            if splits:
-                ops_str = splits[0].get("stat", {}).get("ops")
-                if ops_str:
-                    ops = float(ops_str)
-                break
+        ops = _parse_ops_from_person(sp)
     except Exception:
         pass
 
-    # --- Recent 14-day batting average ---
+    # Prior-season fallback (early in the year — before June 1)
+    if use_fallback and (vl_avg is None and vr_avg is None):
+        try:
+            async with httpx.AsyncClient() as prior_client:
+                prior_splits_resp, prior_ops_resp = await asyncio.gather(
+                    prior_client.get(
+                        f"{MLB_BASE}/people/{mlb_id}",
+                        params={"hydrate": f"stats(group=hitting,type=statSplits,season={season - 1})"},
+                        timeout=10.0,
+                    ),
+                    prior_client.get(
+                        f"{MLB_BASE}/people/{mlb_id}",
+                        params={"hydrate": f"stats(group=hitting,type=season,season={season - 1})"},
+                        timeout=10.0,
+                    ),
+                )
+            prior_splits_resp.raise_for_status()
+            prior_person = prior_splits_resp.json().get("people", [{}])[0]
+            prior_data = _parse_splits_from_person(prior_person)
+            vl_avg = prior_data["vL"]
+            vr_avg = prior_data["vR"]
+            home_avg = prior_data["home_avg"]
+            away_avg = prior_data["away_avg"]
+
+            if ops is None:
+                try:
+                    prior_ops_resp.raise_for_status()
+                    prior_sp = prior_ops_resp.json().get("people", [{}])[0]
+                    ops = _parse_ops_from_person(prior_sp)
+                except Exception:
+                    pass
+        except Exception as exc:
+            print(f"[mlb_api] prior-season fallback failed for {mlb_id}: {exc}")
+
+    # --- Recent 7-day batting average ---
     recent_avg = None
     try:
         gamelog_resp.raise_for_status()
         gl = gamelog_resp.json().get("people", [{}])[0]
-        cutoff = today - timedelta(days=14)
+        cutoff = today - timedelta(days=7)
         hits = at_bats = 0
         for sg in gl.get("stats", []):
             for split in sg.get("splits", []):
@@ -329,7 +372,7 @@ async def get_hitter_details(mlb_id: int, season: int | None = None) -> dict:
                     stat = split.get("stat", {})
                     hits += int(stat.get("hits", 0))
                     at_bats += int(stat.get("atBats", 0))
-        if at_bats >= 10:
+        if at_bats >= 5:  # lower threshold since 7-day window is shorter
             recent_avg = round(hits / at_bats, 3)
     except Exception:
         pass

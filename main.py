@@ -138,7 +138,8 @@ async def _enrich_hitter(
         except Exception:
             pass
 
-    has_game = team in teams_with_game
+    on_il = p.get("selected_position", "") in ("IL", "IL+")
+    has_game = (team in teams_with_game) and not on_il
     home_team = game_venue.get(team, team)
     is_home = home_team == team
     park_factor = PARK_FACTORS.get(home_team, 1.0)
