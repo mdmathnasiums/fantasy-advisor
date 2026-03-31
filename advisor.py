@@ -214,9 +214,9 @@ def build_reason(hitter: HitterInfo, rec: str, ace: bool) -> str:
     if hitter.recent_avg is not None:
         avg_str = f".{int(round(hitter.recent_avg * 1000)):03d}"
         if hitter.recent_avg >= 0.300:
-            parts.append(f"hot streak ({avg_str} L14)")
+            parts.append(f"hot streak ({avg_str} L7)")
         elif hitter.recent_avg <= 0.180:
-            parts.append(f"slumping ({avg_str} L14)")
+            parts.append(f"slumping ({avg_str} L7)")
 
     # Best available split
     if hitter.career_vs_pitcher is not None:

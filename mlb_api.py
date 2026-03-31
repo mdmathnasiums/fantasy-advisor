@@ -211,8 +211,12 @@ async def search_player(name: str) -> int | None:
 
 
 def _parse_stat_splits(stat_list: list) -> dict:
-    """Parse a MLB /stats direct endpoint response list into vL, vR, home_avg, away_avg."""
+    """Parse a MLB /stats direct endpoint response list into vL, vR, home_avg, away_avg.
+
+    Also returns vL_ab / vR_ab so callers can enforce a minimum sample size.
+    """
     vl_avg = vr_avg = home_avg = away_avg = ops = None
+    vl_ab = vr_ab = 0
     for stat_group in stat_list:
         for split in stat_group.get("splits", []):
             code = split.get("split", {}).get("code", "")
@@ -221,10 +225,13 @@ def _parse_stat_splits(stat_list: list) -> dict:
             if avg_str:
                 try:
                     avg = float(avg_str)
+                    ab = int(s.get("atBats", 0))
                     if code == "vl":
                         vl_avg = avg
+                        vl_ab = ab
                     elif code == "vr":
                         vr_avg = avg
+                        vr_ab = ab
                     elif code == "h":
                         home_avg = avg
                     elif code == "a":
@@ -238,7 +245,12 @@ def _parse_stat_splits(stat_list: list) -> dict:
                     ops = float(ops_str)
                 except (ValueError, TypeError):
                     pass
-    return {"vL": vl_avg, "vR": vr_avg, "home_avg": home_avg, "away_avg": away_avg, "ops": ops}
+    return {
+        "vL": vl_avg, "vR": vr_avg,
+        "home_avg": home_avg, "away_avg": away_avg,
+        "ops": ops,
+        "vL_ab": vl_ab, "vR_ab": vr_ab,
+    }
 
 
 async def _get_stats_direct(
@@ -312,7 +324,13 @@ async def get_hitter_details(mlb_id: int, season: int | None = None) -> dict:
                 break
 
     # --- Prior-season fallback (early in the year — before June 1) ---
-    if use_fallback and vl_avg is None and vr_avg is None:
+    # Also fall back when current-year sample is too small to trust (< 15 AB vs either hand).
+    MIN_SPLIT_AB = 15
+    thin_sample = (
+        splits_data.get("vL_ab", 0) < MIN_SPLIT_AB or
+        splits_data.get("vR_ab", 0) < MIN_SPLIT_AB
+    )
+    if use_fallback and (vl_avg is None or vr_avg is None or thin_sample):
         try:
             async with httpx.AsyncClient() as prior_client:
                 prior_splits, prior_ha, prior_season = await asyncio.gather(
