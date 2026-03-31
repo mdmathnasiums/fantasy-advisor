@@ -242,12 +242,16 @@ def _parse_stat_splits(stat_list: list) -> dict:
 
 
 async def _get_stats_direct(
-    client: httpx.AsyncClient, mlb_id: int, stats_type: str, season: int
+    client: httpx.AsyncClient, mlb_id: int, stats_type: str, season: int,
+    extra_params: dict | None = None,
 ) -> list:
     """Call /people/{id}/stats directly. Returns the stats list or []."""
+    params = {"stats": stats_type, "group": "hitting", "season": season}
+    if extra_params:
+        params.update(extra_params)
     resp = await client.get(
         f"{MLB_BASE}/people/{mlb_id}/stats",
-        params={"stats": stats_type, "group": "hitting", "season": season},
+        params=params,
         timeout=12.0,
     )
     resp.raise_for_status()
@@ -266,9 +270,11 @@ async def get_hitter_details(mlb_id: int, season: int | None = None) -> dict:
 
     async with httpx.AsyncClient() as client:
         # bat side comes from the person record (not a stat)
-        person_resp, splits_stats, season_stats, gamelog_stats = await asyncio.gather(
+        # statSplits requires sitCodes — without them the API returns empty splits
+        person_resp, splits_stats, ha_stats, season_stats, gamelog_stats = await asyncio.gather(
             client.get(f"{MLB_BASE}/people/{mlb_id}", timeout=10.0),
-            _get_stats_direct(client, mlb_id, "statSplits", season),
+            _get_stats_direct(client, mlb_id, "statSplits", season, {"sitCodes": "vl,vr"}),
+            _get_stats_direct(client, mlb_id, "statSplits", season, {"sitCodes": "h,a"}),
             _get_stats_direct(client, mlb_id, "season", season),
             _get_stats_direct(client, mlb_id, "gameLog", season),
             return_exceptions=True,
@@ -284,10 +290,11 @@ async def get_hitter_details(mlb_id: int, season: int | None = None) -> dict:
 
     # --- Current season splits ---
     splits_data = _parse_stat_splits(splits_stats if not isinstance(splits_stats, Exception) else [])
+    ha_data = _parse_stat_splits(ha_stats if not isinstance(ha_stats, Exception) else [])
     vl_avg = splits_data["vL"]
     vr_avg = splits_data["vR"]
-    home_avg = splits_data["home_avg"]
-    away_avg = splits_data["away_avg"]
+    home_avg = ha_data["home_avg"]
+    away_avg = ha_data["away_avg"]
 
     # --- OPS from season stats ---
     ops = None
@@ -308,17 +315,19 @@ async def get_hitter_details(mlb_id: int, season: int | None = None) -> dict:
     if use_fallback and vl_avg is None and vr_avg is None:
         try:
             async with httpx.AsyncClient() as prior_client:
-                prior_splits, prior_season = await asyncio.gather(
-                    _get_stats_direct(prior_client, mlb_id, "statSplits", season - 1),
+                prior_splits, prior_ha, prior_season = await asyncio.gather(
+                    _get_stats_direct(prior_client, mlb_id, "statSplits", season - 1, {"sitCodes": "vl,vr"}),
+                    _get_stats_direct(prior_client, mlb_id, "statSplits", season - 1, {"sitCodes": "h,a"}),
                     _get_stats_direct(prior_client, mlb_id, "season", season - 1),
                     return_exceptions=True,
                 )
             if not isinstance(prior_splits, Exception):
                 prior_data = _parse_stat_splits(prior_splits)
+                prior_ha_data = _parse_stat_splits(prior_ha if not isinstance(prior_ha, Exception) else [])
                 vl_avg = prior_data["vL"]
                 vr_avg = prior_data["vR"]
-                home_avg = prior_data["home_avg"]
-                away_avg = prior_data["away_avg"]
+                home_avg = prior_ha_data["home_avg"]
+                away_avg = prior_ha_data["away_avg"]
                 print(f"[mlb_api] using {season - 1} splits for player {mlb_id}: vL={vl_avg} vR={vr_avg}")
             if ops is None and not isinstance(prior_season, Exception):
                 for sg in prior_season:
