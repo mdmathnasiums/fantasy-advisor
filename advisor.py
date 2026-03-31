@@ -62,10 +62,10 @@ def get_matchup_quality(hitter: HitterInfo) -> str:
 
 def recommend(score: float, all_scores: list[float], is_ace_pitcher: bool) -> str:
     """
-    Start = top 60% (above 40th percentile)
-    Sit   = bottom 25% (at or below 25th percentile)
+    Start = score >= 60th percentile of active hitters
+    Sit   = score <= 25th percentile of active hitters
     Flex  = middle
-    Ace pitcher downgrades by one level.
+    Ace pitcher (ERA<3.00 or WHIP<1.00) downgrades by one level: Start→Flex, Flex→Sit.
     """
     if not all_scores:
         return "Flex"

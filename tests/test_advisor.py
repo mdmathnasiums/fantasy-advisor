@@ -47,6 +47,12 @@ def test_score_uses_fallback_era_when_none():
     assert score > 0  # uses fallback ERA of 4.50
 
 
+def test_score_uses_fallback_whip_when_none():
+    h = hitter(vR=0.280, pitcher_obj=PitcherInfo("X", "R", era=4.0, whip=None))
+    score = score_hitter(h)
+    assert score > 0  # uses fallback WHIP of 1.30
+
+
 # --- is_ace ---
 
 def test_is_ace_low_era():
