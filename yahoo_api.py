@@ -20,6 +20,10 @@ def parse_player_info(info_list: list) -> dict:
 
 
 def _parse_eligible_positions(ep_obj) -> list[str]:
+    # Yahoo returns a list of {"position": "X"} dicts
+    if isinstance(ep_obj, list):
+        return [item["position"] for item in ep_obj if isinstance(item, dict) and "position" in item]
+    # Fallback: old assumed format {"position": "X"} or {"position": ["X", "Y"]}
     if not isinstance(ep_obj, dict):
         return []
     pos = ep_obj.get("position", [])
@@ -77,14 +81,14 @@ def _parse_roster_response(data: dict) -> list[dict]:
 
     Yahoo's compound query nests:
     fantasy_content → users → 0 → user →
-    [2] → games → 0 → game →
+    [1] → games → 0 → game →
     [1] → leagues → 0 → league →
     [1] → teams → 0 → team → [1] → roster
     """
     try:
         fc = data["fantasy_content"]
         user = fc["users"]["0"]["user"]
-        game = user[2]["games"]["0"]["game"]
+        game = user[1]["games"]["0"]["game"]
         league = game[1]["leagues"]["0"]["league"]
         team = league[1]["teams"]["0"]["team"]
         roster = team[1]["roster"]
