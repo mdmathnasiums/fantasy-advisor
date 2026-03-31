@@ -1,15 +1,26 @@
+# main.py
+import asyncio
 import html
 import os
 import secrets
+from datetime import date
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+
 from yahoo_auth import token_store, get_auth_url, exchange_code
 from yahoo_api import fetch_raw_roster, get_roster, LEAGUES
+from mlb_api import (
+    get_probable_pitchers, enrich_pitchers,
+    search_player, get_hitter_details,
+)
+from advisor import HitterInfo, PitcherInfo, advise_roster
 
 app = FastAPI(title="Fantasy Baseball Advisor")
 templates = Jinja2Templates(directory="templates")
 
+# --- Auth routes ---
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
@@ -46,10 +57,12 @@ async def auth_callback(code: str, state: str = ""):
   <li>Add: <code>YAHOO_REFRESH_TOKEN</code> = token above</li>
   <li>Save &rarr; service redeploys automatically</li>
 </ol>
-<p><a href="/">→ Continue to app</a></p>
+<p><a href="/">&#8594; Continue to app</a></p>
 </body></html>
 """)
 
+
+# --- API routes ---
 
 @app.get("/health")
 async def health():
@@ -77,3 +90,88 @@ async def roster(league_id: str):
         return await get_roster(league_id)
     except ValueError as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+
+async def _enrich_hitter(
+    p: dict, pitchers: dict[str, dict], season: int
+) -> HitterInfo:
+    """Look up MLB ID, fetch splits, build HitterInfo. Never raises."""
+    mlb_id = await search_player(p["full_name"])
+    splits = {"vL": None, "vR": None}
+    bats = p.get("bats")
+    if mlb_id:
+        try:
+            details = await get_hitter_details(mlb_id, season)
+            splits = {"vL": details.get("vL"), "vR": details.get("vR")}
+            bats = details.get("bats") or bats
+        except Exception:
+            pass
+
+    pitcher_raw = pitchers.get(p["team_abbr"])
+    pitcher = None
+    if pitcher_raw:
+        pitcher = PitcherInfo(
+            name=pitcher_raw["name"],
+            throws=pitcher_raw.get("throws") or "R",
+            era=pitcher_raw.get("era"),
+            whip=pitcher_raw.get("whip"),
+        )
+
+    return HitterInfo(
+        player_id=p["player_id"],
+        full_name=p["full_name"],
+        team_abbr=p["team_abbr"],
+        position=p["position"],
+        selected_position=p["selected_position"],
+        bats=bats,
+        splits=splits,
+        pitcher=pitcher,
+    )
+
+
+PITCHER_POSITIONS = {"SP", "RP", "P"}
+
+
+@app.get("/api/today")
+async def today_view():
+    today = date.today()
+    pitchers = await get_probable_pitchers(today)
+    pitchers = await enrich_pitchers(pitchers)
+
+    results = []
+    for league_id, league_info in LEAGUES.items():
+        try:
+            raw_players = await get_roster(league_id)
+        except Exception as e:
+            results.append({
+                "league_id": league_id,
+                "league_name": league_info["name"],
+                "error": str(e),
+            })
+            continue
+
+        candidates = [
+            p for p in raw_players
+            if p["position"] not in PITCHER_POSITIONS
+        ]
+
+        hitters = await asyncio.gather(
+            *[_enrich_hitter(p, pitchers, today.year) for p in candidates]
+        )
+
+        advised = advise_roster(list(hitters))
+
+        results.append({
+            "league_id": league_id,
+            "league_name": league_info["name"],
+            "date": today.isoformat(),
+            "players": advised,
+            "stats": {
+                "active_hitters": sum(1 for p in advised if p["has_game"]),
+                "strong_matchups": sum(1 for p in advised if p["matchup_quality"] == "good"),
+                "tough_matchups": sum(1 for p in advised if p["matchup_quality"] == "bad"),
+                "no_game": sum(1 for p in advised if not p["has_game"]),
+            },
+        })
+
+    return results
