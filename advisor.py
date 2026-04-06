@@ -47,6 +47,8 @@ class HitterInfo:
     career_vs_pitcher: dict | None = None   # {"avg": float, "pa": int} or None
     park_factor: float = 1.0
     is_home: bool = False
+    confirmed_start: bool | None = None    # True/False when lineup is posted, None when unknown
+    confirmed_sit: bool | None = None
 
 
 def is_ace(pitcher: PitcherInfo) -> bool:
@@ -267,6 +269,9 @@ def advise_roster(hitters: list[HitterInfo]) -> list[dict]:
         ace = is_ace(p) if p else False
         rec = recommend(score, active_scores, ace) if p else "Sit"
         rec = _apply_star_protection(rec, h, ace)
+        # Confirmed lineup scratch overrides everything — no star protection exception
+        if h.confirmed_sit:
+            rec = "Sit"
 
         result.append({
             "player_id": h.player_id,
@@ -296,6 +301,8 @@ def advise_roster(hitters: list[HitterInfo]) -> list[dict]:
             "career_vs_pitcher": h.career_vs_pitcher,
             "park_factor": round(h.park_factor, 2),
             "is_home": h.is_home,
+            "confirmed_start": h.confirmed_start,
+            "confirmed_sit": h.confirmed_sit,
         })
 
     result.sort(key=lambda x: (

@@ -125,3 +125,43 @@ async def get_roster(league_id: str) -> list[dict]:
     """Fetch and parse the authenticated user's roster for a given league."""
     data = await fetch_raw_roster(league_id)
     return _parse_roster_response(data)
+
+
+async def get_available_players(league_id: str, count: int = 25) -> list[dict]:
+    """Fetch available (waiver/FA) hitters from Yahoo for a given league.
+
+    Uses status=A (available), sort=AR (add rate — most added first).
+    Returns same dict shape as get_roster() players.
+    """
+    if league_id not in LEAGUES:
+        raise ValueError(f"Unknown league_id: {league_id}")
+    league_key = LEAGUES[league_id]["key"]
+    access_token = await token_store.get_access_token()
+    url = f"{API_BASE}/league/{league_key}/players;status=A;count={count};sort=AR"
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            url,
+            params={"format": "json"},
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=20.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    # Response path: fantasy_content → league → [1] → players → {count, 0..N → player}
+    try:
+        players_obj = data["fantasy_content"]["league"][1]["players"]
+    except (KeyError, IndexError, TypeError):
+        print(f"[yahoo_api] get_available_players: unexpected response shape for {league_id}")
+        return []
+
+    count_val = int(players_obj.get("count", 0))
+    results = []
+    for i in range(count_val):
+        player_entry = players_obj.get(str(i), {}).get("player", [])
+        if player_entry:
+            parsed = parse_player(player_entry)
+            # Available players have no selected_position — default to BN-equivalent
+            parsed["selected_position"] = parsed.get("selected_position") or "FA"
+            results.append(parsed)
+    return results

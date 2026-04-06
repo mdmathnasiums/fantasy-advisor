@@ -62,7 +62,7 @@
   .filter-count { color: var(--text-muted); font-size: 12px; margin-left: 4px; }
 
   /* Table */
-  .table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
   table { width: 100%; border-collapse: collapse; }
   thead th { background: var(--surface2); padding: 10px 12px; text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); font-weight: 600; white-space: nowrap; }
   tbody tr { border-top: 1px solid var(--border); transition: background 0.1s; }
@@ -111,6 +111,11 @@
   .rec-flex { background: rgba(186,117,23,0.2); color: var(--amber); border: 1px solid rgba(186,117,23,0.4); }
   .rec-nogame { background: var(--surface2); color: var(--text-muted); border: 1px solid var(--border); font-size: 11px; }
 
+  /* Confirmed lineup badges */
+  .confirmed-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 4px; font-size: 12px; font-weight: 700; }
+  .confirmed-in  { background: rgba(99,153,34,0.15); color: var(--green); border: 1px solid rgba(99,153,34,0.4); }
+  .confirmed-out { background: rgba(163,45,45,0.15); color: var(--red);   border: 1px solid rgba(163,45,45,0.4); }
+
   /* Active toggle */
   .toggle { position: relative; display: inline-block; width: 34px; height: 18px; cursor: pointer; }
   .toggle input { opacity: 0; width: 0; height: 0; }
@@ -128,6 +133,16 @@
   .footer-btn { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 7px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: background 0.15s; }
   .footer-btn:hover:not(:disabled) { background: #2d3f55; }
   .footer-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .footer-btn.active { background: rgba(99,153,34,0.15); border-color: var(--green); color: var(--green); }
+
+  /* Waiver panel */
+  .waiver-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-top: 16px; overflow: hidden; }
+  .waiver-header { background: var(--surface2); padding: 12px 16px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); }
+  .waiver-header h3 { font-size: 14px; font-weight: 600; flex: 1; }
+  .waiver-league-select { background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 4px 10px; border-radius: 5px; font-size: 13px; cursor: pointer; }
+  .waiver-loading { padding: 24px; text-align: center; color: var(--text-muted); font-size: 13px; }
+  .waiver-close { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 18px; line-height: 1; padding: 2px 6px; border-radius: 4px; }
+  .waiver-close:hover { color: var(--text); background: var(--surface); }
 
   /* Reason blurb */
   .reason-text { font-size: 11px; color: var(--text-muted); margin-top: 3px; font-style: italic; }
@@ -139,7 +154,6 @@
     .summary-cards { grid-template-columns: repeat(2, 1fr); }
     .splits-col { display: none; }
     .active-col { display: none; }
-    .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
     td, th { padding: 8px 8px; }
     main { padding: 12px 10px; }
   }
@@ -211,10 +225,23 @@
       <tbody id="table-body"></tbody>
     </table>
   </div>
+
+  <div id="waiver-panel" style="display:none">
+    <div class="waiver-panel">
+      <div class="waiver-header">
+        <h3>⚡ Waiver Suggestions</h3>
+        <select class="waiver-league-select" id="waiver-league-select"></select>
+        <button class="waiver-close" id="waiver-close" title="Close">✕</button>
+      </div>
+      <div id="waiver-body">
+        <div class="waiver-loading">Loading available players…</div>
+      </div>
+    </div>
+  </div>
 </main>
 
 <footer>
-  <button class="footer-btn" disabled title="Coming in v2">Waiver Suggestions</button>
+  <button class="footer-btn" id="waiver-btn">Waiver Suggestions</button>
   <button class="footer-btn" disabled title="Coming in v2">Push Lineup to Yahoo</button>
 </footer>
 
@@ -385,8 +412,15 @@ function buildRow(player) {
     </div>` : ''}
   ` : `<span style="color:var(--text-muted);font-size:12px">No game</span>`;
 
+  let confirmedBadge = '';
+  if (player.confirmed_start) {
+    confirmedBadge = `<span class="confirmed-badge confirmed-in" title="Confirmed in starting lineup">✓ In</span> `;
+  } else if (player.confirmed_sit) {
+    confirmedBadge = `<span class="confirmed-badge confirmed-out" title="Scratched from lineup">✗ Out</span> `;
+  }
+
   const recHtml = player.has_game
-    ? `<span class="rec-tag ${recClass(player.recommendation)}" title="${scoreBreakdownTitle(player.score_breakdown)}">${esc(player.recommendation)}</span>
+    ? `${confirmedBadge}<span class="rec-tag ${recClass(player.recommendation)}" title="${scoreBreakdownTitle(player.score_breakdown)}">${esc(player.recommendation)}</span>
        ${player.reason ? `<div class="reason-text">${esc(player.reason)}</div>` : ''}`
     : `<span class="rec-tag rec-nogame">No Game</span>`;
 
@@ -499,8 +533,96 @@ async function loadData(offset) {
   renderAll();
 }
 
-// Date toggle
-document.querySelectorAll('.date-btn').forEach(btn => {
+// ---- Waiver panel ----
+
+let waiverOpen = false;
+
+function buildWaiverTable(players) {
+  if (!players.length) return '<div class="waiver-loading">No available hitters with games today.</div>';
+  const rows = players.map(p => {
+    const pitcher = p.pitcher;
+    const throws = pitcher?.throws;
+    return `<tr data-rec="${p.recommendation}">
+      <td><span class="pos-tag">${esc(p.position)}</span></td>
+      <td>
+        <div><strong>${esc(p.full_name)}</strong> ${handBadge(p.bats, 'batter')} ${hotColdBadge(p.recent_avg)}</div>
+        <div style="font-size:11px;color:var(--text-muted)">${esc(p.team_abbr)}</div>
+      </td>
+      <td>
+        ${matchupPill(p.matchup_quality)}
+        ${pitcher ? `<div class="pitcher-line">${esc(pitcher.name)} ${handBadge(throws, 'pitcher')}${pitcher.is_ace ? '<span class="ace-flag">&#9733;</span>' : ''}</div>
+        <div class="pitcher-stats-line"><span class="pitcher-stat">${fmtEra(pitcher)} ERA</span><span class="pitcher-stat"> &middot; ${fmtWhip(pitcher)} WHIP</span></div>` : ''}
+      </td>
+      <td class="splits-col">${buildSplitBars(p.splits, throws)}</td>
+      <td><span class="rec-tag ${recClass(p.recommendation)}" title="${scoreBreakdownTitle(p.score_breakdown)}">${esc(p.recommendation)}</span>
+        ${p.reason ? `<div class="reason-text">${esc(p.reason)}</div>` : ''}
+      </td>
+    </tr>`;
+  }).join('');
+  return `<div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+    <table style="width:100%;border-collapse:collapse">
+      <thead><tr>
+        <th style="background:var(--surface2);padding:8px 12px;text-align:left;font-size:11px;text-transform:uppercase;color:var(--text-muted);white-space:nowrap">Pos</th>
+        <th style="background:var(--surface2);padding:8px 12px;text-align:left;font-size:11px;text-transform:uppercase;color:var(--text-muted)">Player</th>
+        <th style="background:var(--surface2);padding:8px 12px;text-align:left;font-size:11px;text-transform:uppercase;color:var(--text-muted)">Matchup</th>
+        <th class="splits-col" style="background:var(--surface2);padding:8px 12px;text-align:left;font-size:11px;text-transform:uppercase;color:var(--text-muted)">Splits</th>
+        <th style="background:var(--surface2);padding:8px 12px;text-align:left;font-size:11px;text-transform:uppercase;color:var(--text-muted)">Rec</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+}
+
+async function loadWaivers(leagueId) {
+  const body = document.getElementById('waiver-body');
+  body.innerHTML = '<div class="waiver-loading">Loading available players…</div>';
+  const dateStr = getDateStr(activeDateOffset);
+  try {
+    const resp = await fetch(`/api/waivers?league_id=${encodeURIComponent(leagueId)}&game_date=${dateStr}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    body.innerHTML = buildWaiverTable(data.players || []);
+  } catch (err) {
+    body.innerHTML = `<div class="waiver-loading" style="color:var(--red)">Failed to load waivers: ${esc(err.message)}</div>`;
+  }
+}
+
+function openWaiverPanel() {
+  waiverOpen = true;
+  const panel = document.getElementById('waiver-panel');
+  const btn = document.getElementById('waiver-btn');
+  panel.style.display = 'block';
+  btn.classList.add('active');
+
+  // Populate league select
+  const sel = document.getElementById('waiver-league-select');
+  sel.innerHTML = allData.map(l =>
+    `<option value="${esc(l.league_id)}" ${l.league_id === activeLeagueId ? 'selected' : ''}>${esc(l.league_name)}</option>`
+  ).join('');
+
+  loadWaivers(sel.value);
+  // Scroll panel into view
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function closeWaiverPanel() {
+  waiverOpen = false;
+  document.getElementById('waiver-panel').style.display = 'none';
+  document.getElementById('waiver-btn').classList.remove('active');
+}
+
+document.getElementById('waiver-btn').addEventListener('click', () => {
+  if (waiverOpen) closeWaiverPanel();
+  else openWaiverPanel();
+});
+
+document.getElementById('waiver-close').addEventListener('click', closeWaiverPanel);
+
+document.getElementById('waiver-league-select').addEventListener('change', function() {
+  loadWaivers(this.value);
+});
+
+// ---- Date toggle
   btn.addEventListener('click', () => {
     const offset = parseInt(btn.dataset.offset);
     if (offset !== activeDateOffset) loadData(offset);

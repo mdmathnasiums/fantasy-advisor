@@ -12,9 +12,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from yahoo_auth import token_store, get_auth_url, exchange_code
-from yahoo_api import fetch_raw_roster, get_roster, LEAGUES
+from yahoo_api import fetch_raw_roster, get_roster, get_available_players, LEAGUES
 from mlb_api import (
-    get_probable_pitchers, enrich_pitchers,
+    get_probable_pitchers, enrich_pitchers, get_confirmed_lineups,
     search_player, get_hitter_details, get_career_vs_pitcher,
     PARK_FACTORS,
 )
@@ -149,13 +149,14 @@ async def _enrich_hitter(
     teams_with_game: set[str],
     game_venue: dict[str, str],
     season: int,
+    confirmed_lineups: dict | None = None,
 ) -> HitterInfo:
     """Look up MLB ID, fetch all hitter/pitcher enrichment in parallel. Never raises."""
     team = p["team_abbr"]
     pitcher_raw = pitchers.get(team)
     pitcher_mlb_id = pitcher_raw.get("mlb_id") if pitcher_raw else None
 
-    mlb_id = await search_player(p["full_name"])
+    mlb_id = await search_player(p["full_name"], team_abbr=p.get("team_abbr"))
 
     splits = {"vL": None, "vR": None, "home_avg": None, "away_avg": None}
     bats = p.get("bats")
@@ -194,6 +195,19 @@ async def _enrich_hitter(
     is_home = home_team == team
     park_factor = PARK_FACTORS.get(home_team, 1.0)
 
+    # Confirmed lineup status (only meaningful when lineups are posted)
+    confirmed_start: bool | None = None
+    confirmed_sit: bool | None = None
+    if has_game and mlb_id and confirmed_lineups is not None:
+        team_lineup = confirmed_lineups.get(team)
+        if team_lineup is not None:
+            # Lineup posted for this team — we know definitively
+            if mlb_id in team_lineup:
+                confirmed_start = True
+            else:
+                confirmed_sit = True
+        # else: lineup not posted yet — leave both None
+
     pitcher = None
     if has_game and pitcher_raw:
         pitcher = PitcherInfo(
@@ -223,6 +237,8 @@ async def _enrich_hitter(
         career_vs_pitcher=career_vs_pitcher,
         park_factor=park_factor,
         is_home=is_home,
+        confirmed_start=confirmed_start,
+        confirmed_sit=confirmed_sit,
     )
 
 
@@ -241,8 +257,12 @@ async def roster_view(game_date: str | None = None):
 
     teams_with_game: set[str] = set()
     game_venue: dict[str, str] = {}
+    confirmed_lineups: dict = {}
     try:
-        pitchers, teams_with_game, game_venue = await get_probable_pitchers(query_date)
+        (pitchers, teams_with_game, game_venue), confirmed_lineups = await asyncio.gather(
+            get_probable_pitchers(query_date),
+            get_confirmed_lineups(query_date),
+        )
         pitchers = await enrich_pitchers(pitchers)
     except Exception as exc:
         print(f"[main] MLB schedule fetch failed: {exc}")
@@ -267,7 +287,8 @@ async def roster_view(game_date: str | None = None):
         ]
 
         hitters = await asyncio.gather(
-            *[_enrich_hitter(p, pitchers, teams_with_game, game_venue, query_date.year) for p in candidates]
+            *[_enrich_hitter(p, pitchers, teams_with_game, game_venue, query_date.year, confirmed_lineups)
+              for p in candidates]
         )
 
         advised = advise_roster(list(hitters))
@@ -292,3 +313,49 @@ async def roster_view(game_date: str | None = None):
 @app.get("/api/today")
 async def today_view():
     return await roster_view()
+
+
+@app.get("/api/waivers")
+async def waivers_view(league_id: str, game_date: str | None = None):
+    if league_id not in LEAGUES:
+        raise HTTPException(status_code=404, detail=f"Unknown league_id: {league_id}")
+    if game_date:
+        try:
+            query_date = date.fromisoformat(game_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+    else:
+        query_date = date.today()
+
+    # Fetch schedule data and available players in parallel
+    try:
+        (pitchers, teams_with_game, game_venue), confirmed_lineups, raw_players = await asyncio.gather(
+            get_probable_pitchers(query_date),
+            get_confirmed_lineups(query_date),
+            get_available_players(league_id),
+        )
+        pitchers = await enrich_pitchers(pitchers)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Data fetch failed: {exc}")
+
+    candidates = [
+        p for p in raw_players
+        if p["position"] not in PITCHER_POSITIONS
+        and not any(ep in PITCHER_POSITIONS for ep in p.get("eligible_positions", []))
+    ]
+
+    hitters = await asyncio.gather(
+        *[_enrich_hitter(p, pitchers, teams_with_game, game_venue, query_date.year, confirmed_lineups)
+          for p in candidates]
+    )
+
+    advised = advise_roster(list(hitters))
+    # Return only players with a game today, sorted by score descending, top 10
+    with_game = [p for p in advised if p["has_game"]]
+    with_game.sort(key=lambda x: -x["score"])
+    return {
+        "league_id": league_id,
+        "league_name": LEAGUES[league_id]["name"],
+        "date": query_date.isoformat(),
+        "players": with_game[:10],
+    }

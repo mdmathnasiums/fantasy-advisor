@@ -77,6 +77,43 @@ async def get_probable_pitchers(
     return pitchers, teams_with_game, game_venue
 
 
+async def get_confirmed_lineups(game_date: date | None = None) -> dict[str, set[int]]:
+    """Fetch confirmed starting lineups from MLB schedule API.
+
+    Returns {team_abbr: {mlb_player_id, ...}} for teams whose lineups have been posted.
+    Teams with no lineup posted are absent from the dict (not an empty set).
+    """
+    date_str = (game_date or date.today()).strftime("%Y-%m-%d")
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{MLB_BASE}/schedule",
+                params={"sportId": 1, "date": date_str, "hydrate": "lineups,team"},
+                timeout=15.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        print(f"[mlb_api] get_confirmed_lineups failed: {exc}")
+        return {}
+
+    lineups: dict[str, set[int]] = {}
+    for date_entry in data.get("dates", []):
+        for game in date_entry.get("games", []):
+            game_lineups = game.get("lineups")
+            if not game_lineups:
+                continue
+            home_abbr = game.get("teams", {}).get("home", {}).get("team", {}).get("abbreviation", "")
+            away_abbr = game.get("teams", {}).get("away", {}).get("team", {}).get("abbreviation", "")
+            home_players = game_lineups.get("homePlayers", [])
+            away_players = game_lineups.get("awayPlayers", [])
+            if home_abbr and home_players:
+                lineups[home_abbr] = {p.get("id") for p in home_players if p.get("id")}
+            if away_abbr and away_players:
+                lineups[away_abbr] = {p.get("id") for p in away_players if p.get("id")}
+    return lineups
+
+
 def _parse_ip(ip_str) -> float:
     """Convert MLB innings-pitched string '6.1' → 6.333 actual innings."""
     try:
@@ -189,22 +226,73 @@ async def enrich_pitchers(pitchers: dict[str, dict]) -> dict[str, dict]:
     return dict(pairs)
 
 
-async def search_player(name: str) -> int | None:
-    """Look up MLB player ID by full name. Returns first match or None."""
+def _normalize_name(name: str) -> str:
+    """Strip accents, suffixes, and extra whitespace for loose name matching."""
+    import unicodedata
+    # Normalize unicode → ASCII (strips accents)
+    nfkd = unicodedata.normalize("NFKD", name)
+    ascii_name = nfkd.encode("ascii", "ignore").decode("ascii")
+    # Remove generational suffixes
+    import re
+    ascii_name = re.sub(r"\b(Jr\.?|Sr\.?|II|III|IV)\b", "", ascii_name, flags=re.IGNORECASE)
+    return " ".join(ascii_name.split()).strip()
+
+
+async def _search_mlb(client: httpx.AsyncClient, query: str) -> list:
+    resp = await client.get(
+        f"{MLB_BASE}/people/search",
+        params={"names": query, "sportId": 1},
+        timeout=10.0,
+    )
+    resp.raise_for_status()
+    return resp.json().get("people", [])
+
+
+async def search_player(name: str, team_abbr: str | None = None) -> int | None:
+    """Look up MLB player ID by full name.
+
+    Tries in order:
+    1. Exact name search
+    2. Normalized name (accents stripped, suffixes removed)
+    3. Last-name-only search, matched by team abbreviation if provided
+    Logs all misses.
+    """
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"{MLB_BASE}/people/search",
-                params={"names": name, "sportId": 1},
-                timeout=10.0,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        people = data.get("people", [])
-        mlb_id = people[0].get("id") if people else None
-        if mlb_id is None:
-            print(f"[mlb_api] search_player: no result for '{name}' (status={resp.status_code})")
-        return mlb_id
+            # Pass 1: exact name
+            people = await _search_mlb(client, name)
+            if people:
+                return people[0].get("id")
+
+            # Pass 2: normalized (strip accents + suffixes)
+            normalized = _normalize_name(name)
+            if normalized.lower() != name.lower():
+                people = await _search_mlb(client, normalized)
+                if people:
+                    print(f"[mlb_api] search_player: matched '{name}' via normalized '{normalized}'")
+                    return people[0].get("id")
+
+            # Pass 3: last name only, match on team if available
+            last_name = normalized.split()[-1] if normalized else name.split()[-1]
+            people = await _search_mlb(client, last_name)
+            if people and team_abbr:
+                for p in people:
+                    # MLB uses currentTeam or lastPlayedTeam abbreviation
+                    mlb_team = (
+                        p.get("currentTeam", {}).get("abbreviation") or
+                        p.get("lastPlayedTeam", {}).get("abbreviation") or ""
+                    )
+                    if mlb_team.upper() == team_abbr.upper():
+                        print(f"[mlb_api] search_player: matched '{name}' via last name + team '{team_abbr}'")
+                        return p.get("id")
+            elif people and not team_abbr:
+                # No team to disambiguate — take first if only one result
+                if len(people) == 1:
+                    print(f"[mlb_api] search_player: matched '{name}' via last name (single result)")
+                    return people[0].get("id")
+
+        print(f"[mlb_api] search_player: NO MATCH for '{name}' (team={team_abbr})")
+        return None
     except Exception as exc:
         print(f"[mlb_api] search_player: exception for '{name}': {exc}")
         return None
