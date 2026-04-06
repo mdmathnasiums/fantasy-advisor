@@ -229,13 +229,20 @@ async def _enrich_hitter(
 PITCHER_POSITIONS = {"SP", "RP", "P"}
 
 
-@app.get("/api/today")
-async def today_view():
-    today = date.today()
+@app.get("/api/roster")
+async def roster_view(game_date: str | None = None):
+    if game_date:
+        try:
+            query_date = date.fromisoformat(game_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+    else:
+        query_date = date.today()
+
     teams_with_game: set[str] = set()
     game_venue: dict[str, str] = {}
     try:
-        pitchers, teams_with_game, game_venue = await get_probable_pitchers(today)
+        pitchers, teams_with_game, game_venue = await get_probable_pitchers(query_date)
         pitchers = await enrich_pitchers(pitchers)
     except Exception as exc:
         print(f"[main] MLB schedule fetch failed: {exc}")
@@ -260,7 +267,7 @@ async def today_view():
         ]
 
         hitters = await asyncio.gather(
-            *[_enrich_hitter(p, pitchers, teams_with_game, game_venue, today.year) for p in candidates]
+            *[_enrich_hitter(p, pitchers, teams_with_game, game_venue, query_date.year) for p in candidates]
         )
 
         advised = advise_roster(list(hitters))
@@ -268,7 +275,7 @@ async def today_view():
         results.append({
             "league_id": league_id,
             "league_name": league_info["name"],
-            "date": today.isoformat(),
+            "date": query_date.isoformat(),
             "players": advised,
             "stats": {
                 "active_hitters": sum(1 for p in advised if p["has_game"]),
@@ -279,3 +286,9 @@ async def today_view():
         })
 
     return results
+
+
+# Legacy alias so any bookmarked /api/today links still work
+@app.get("/api/today")
+async def today_view():
+    return await roster_view()
