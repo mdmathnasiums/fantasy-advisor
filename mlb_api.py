@@ -4,6 +4,11 @@ import httpx
 
 MLB_BASE = "https://statsapi.mlb.com/api/v1"
 
+# In-memory cache: Yahoo player name → MLB player ID (or None if not found).
+# Persists for the lifetime of the server process — player name/ID mappings
+# don't change, so this is always safe to cache indefinitely.
+_player_id_cache: dict[str, int | None] = {}
+
 # Park run-scoring factors by home team abbreviation (>1 = hitter-friendly).
 # Range kept tight (±6%) so park doesn't overwhelm splits/pitcher quality.
 PARK_FACTORS: dict[str, float] = {
@@ -251,22 +256,23 @@ async def _search_mlb(client: httpx.AsyncClient, query: str) -> list:
 async def search_player(name: str, team_abbr: str | None = None) -> int | None:
     """Look up MLB player ID by full name.
 
-    Fires all three passes in parallel (not sequential) to avoid adding latency:
+    Results are cached in _player_id_cache for the lifetime of the process —
+    name→ID mappings never change, so subsequent loads are instant.
+
+    Search strategy (at most 2 parallel HTTP calls):
     1. Exact name
     2. Normalized name (accents stripped, suffixes removed) — only if different
-    3. Last name only — resolved by team abbreviation or single-result fallback
-    Logs all misses.
+    Logs all misses so they show up in Render logs.
     """
+    cache_key = name.lower().strip()
+    if cache_key in _player_id_cache:
+        return _player_id_cache[cache_key]
+
     try:
         normalized = _normalize_name(name)
-        last_name = (normalized.split()[-1] if normalized.split() else name.split()[-1])
-
-        # Build deduplicated query list preserving priority order
         queries: list[str] = [name]
         if normalized.lower() != name.lower():
             queries.append(normalized)
-        if last_name.lower() not in (q.lower() for q in queries):
-            queries.append(last_name)
 
         async with httpx.AsyncClient() as client:
             results = await asyncio.gather(
@@ -274,36 +280,22 @@ async def search_player(name: str, team_abbr: str | None = None) -> int | None:
                 return_exceptions=True,
             )
 
-        # Pass 1: exact name
+        mlb_id: int | None = None
+
         r0 = results[0] if not isinstance(results[0], Exception) else []
         if r0:
-            return r0[0].get("id")
-
-        # Pass 2: normalized name
-        if len(results) > 1:
+            mlb_id = r0[0].get("id")
+        elif len(results) > 1:
             r1 = results[1] if not isinstance(results[1], Exception) else []
             if r1:
+                mlb_id = r1[0].get("id")
                 print(f"[mlb_api] search_player: matched '{name}' via normalized '{normalized}'")
-                return r1[0].get("id")
 
-        # Pass 3: last name + team disambiguation
-        if len(results) > 2:
-            r2 = results[2] if not isinstance(results[2], Exception) else []
-            if r2 and team_abbr:
-                for p in r2:
-                    mlb_team = (
-                        p.get("currentTeam", {}).get("abbreviation") or
-                        p.get("lastPlayedTeam", {}).get("abbreviation") or ""
-                    )
-                    if mlb_team.upper() == team_abbr.upper():
-                        print(f"[mlb_api] search_player: matched '{name}' via last name + team '{team_abbr}'")
-                        return p.get("id")
-            elif r2 and len(r2) == 1:
-                print(f"[mlb_api] search_player: matched '{name}' via last name (single result)")
-                return r2[0].get("id")
+        if mlb_id is None:
+            print(f"[mlb_api] search_player: NO MATCH for '{name}' (team={team_abbr})")
 
-        print(f"[mlb_api] search_player: NO MATCH for '{name}' (team={team_abbr})")
-        return None
+        _player_id_cache[cache_key] = mlb_id
+        return mlb_id
     except Exception as exc:
         print(f"[mlb_api] search_player: exception for '{name}': {exc}")
         return None
