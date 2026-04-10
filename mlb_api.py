@@ -251,33 +251,46 @@ async def _search_mlb(client: httpx.AsyncClient, query: str) -> list:
 async def search_player(name: str, team_abbr: str | None = None) -> int | None:
     """Look up MLB player ID by full name.
 
-    Tries in order:
-    1. Exact name search
-    2. Normalized name (accents stripped, suffixes removed)
-    3. Last-name-only search, matched by team abbreviation if provided
+    Fires all three passes in parallel (not sequential) to avoid adding latency:
+    1. Exact name
+    2. Normalized name (accents stripped, suffixes removed) — only if different
+    3. Last name only — resolved by team abbreviation or single-result fallback
     Logs all misses.
     """
     try:
+        normalized = _normalize_name(name)
+        last_name = (normalized.split()[-1] if normalized.split() else name.split()[-1])
+
+        # Build deduplicated query list preserving priority order
+        queries: list[str] = [name]
+        if normalized.lower() != name.lower():
+            queries.append(normalized)
+        if last_name.lower() not in (q.lower() for q in queries):
+            queries.append(last_name)
+
         async with httpx.AsyncClient() as client:
-            # Pass 1: exact name
-            people = await _search_mlb(client, name)
-            if people:
-                return people[0].get("id")
+            results = await asyncio.gather(
+                *[_search_mlb(client, q) for q in queries],
+                return_exceptions=True,
+            )
 
-            # Pass 2: normalized (strip accents + suffixes)
-            normalized = _normalize_name(name)
-            if normalized.lower() != name.lower():
-                people = await _search_mlb(client, normalized)
-                if people:
-                    print(f"[mlb_api] search_player: matched '{name}' via normalized '{normalized}'")
-                    return people[0].get("id")
+        # Pass 1: exact name
+        r0 = results[0] if not isinstance(results[0], Exception) else []
+        if r0:
+            return r0[0].get("id")
 
-            # Pass 3: last name only, match on team if available
-            last_name = normalized.split()[-1] if normalized else name.split()[-1]
-            people = await _search_mlb(client, last_name)
-            if people and team_abbr:
-                for p in people:
-                    # MLB uses currentTeam or lastPlayedTeam abbreviation
+        # Pass 2: normalized name
+        if len(results) > 1:
+            r1 = results[1] if not isinstance(results[1], Exception) else []
+            if r1:
+                print(f"[mlb_api] search_player: matched '{name}' via normalized '{normalized}'")
+                return r1[0].get("id")
+
+        # Pass 3: last name + team disambiguation
+        if len(results) > 2:
+            r2 = results[2] if not isinstance(results[2], Exception) else []
+            if r2 and team_abbr:
+                for p in r2:
                     mlb_team = (
                         p.get("currentTeam", {}).get("abbreviation") or
                         p.get("lastPlayedTeam", {}).get("abbreviation") or ""
@@ -285,11 +298,9 @@ async def search_player(name: str, team_abbr: str | None = None) -> int | None:
                     if mlb_team.upper() == team_abbr.upper():
                         print(f"[mlb_api] search_player: matched '{name}' via last name + team '{team_abbr}'")
                         return p.get("id")
-            elif people and not team_abbr:
-                # No team to disambiguate — take first if only one result
-                if len(people) == 1:
-                    print(f"[mlb_api] search_player: matched '{name}' via last name (single result)")
-                    return people[0].get("id")
+            elif r2 and len(r2) == 1:
+                print(f"[mlb_api] search_player: matched '{name}' via last name (single result)")
+                return r2[0].get("id")
 
         print(f"[mlb_api] search_player: NO MATCH for '{name}' (team={team_abbr})")
         return None
