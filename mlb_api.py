@@ -9,6 +9,23 @@ MLB_BASE = "https://statsapi.mlb.com/api/v1"
 # don't change, so this is always safe to cache indefinitely.
 _player_id_cache: dict[str, int | None] = {}
 
+# Semaphore to cap concurrent outbound MLB Stats API calls.
+# Without this, 16 players × 5 stat calls = 80 simultaneous requests → API throttles.
+# 15 concurrent calls keeps load manageable while still being fast.
+_mlb_semaphore: asyncio.Semaphore | None = None
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _mlb_semaphore
+    if _mlb_semaphore is None:
+        _mlb_semaphore = asyncio.Semaphore(15)
+    return _mlb_semaphore
+
+
+async def _mlb_get(client: httpx.AsyncClient, url: str, **kwargs) -> httpx.Response:
+    """Thin wrapper around client.get that respects the MLB API concurrency limit."""
+    async with _get_semaphore():
+        return await client.get(url, **kwargs)
+
 # Park run-scoring factors by home team abbreviation (>1 = hitter-friendly).
 # Range kept tight (±6%) so park doesn't overwhelm splits/pitcher quality.
 PARK_FACTORS: dict[str, float] = {
@@ -32,7 +49,7 @@ async def get_probable_pitchers(
     """
     date_str = (game_date or date.today()).strftime("%Y-%m-%d")
     async with httpx.AsyncClient() as client:
-        resp = await client.get(
+        resp = await _mlb_get(client,
             f"{MLB_BASE}/schedule",
             params={"sportId": 1, "date": date_str, "hydrate": "probablePitcher,team"},
             timeout=15.0,
@@ -91,7 +108,7 @@ async def get_confirmed_lineups(game_date: date | None = None) -> dict[str, set[
     date_str = (game_date or date.today()).strftime("%Y-%m-%d")
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.get(
+            resp = await _mlb_get(client,
                 f"{MLB_BASE}/schedule",
                 params={"sportId": 1, "date": date_str, "hydrate": "lineups,team"},
                 timeout=15.0,
@@ -135,12 +152,12 @@ async def get_pitcher_details(mlb_id: int, season: int | None = None) -> dict:
     season = season or date.today().year
     async with httpx.AsyncClient() as client:
         season_resp, gamelog_resp = await asyncio.gather(
-            client.get(
+            _mlb_get(client,
                 f"{MLB_BASE}/people/{mlb_id}",
                 params={"hydrate": f"stats(group=pitching,type=season,season={season})"},
                 timeout=10.0,
             ),
-            client.get(
+            _mlb_get(client,
                 f"{MLB_BASE}/people/{mlb_id}",
                 params={"hydrate": f"stats(group=pitching,type=gameLog,season={season})"},
                 timeout=10.0,
@@ -244,7 +261,7 @@ def _normalize_name(name: str) -> str:
 
 
 async def _search_mlb(client: httpx.AsyncClient, query: str) -> list:
-    resp = await client.get(
+    resp = await _mlb_get(client,
         f"{MLB_BASE}/people/search",
         params={"names": query, "sportId": 1},
         timeout=10.0,
@@ -352,7 +369,7 @@ async def _get_stats_direct(
     params = {"stats": stats_type, "group": "hitting", "season": season}
     if extra_params:
         params.update(extra_params)
-    resp = await client.get(
+    resp = await _mlb_get(client,
         f"{MLB_BASE}/people/{mlb_id}/stats",
         params=params,
         timeout=12.0,
@@ -375,7 +392,7 @@ async def get_hitter_details(mlb_id: int, season: int | None = None) -> dict:
         # bat side comes from the person record (not a stat)
         # statSplits requires sitCodes — without them the API returns empty splits
         person_resp, splits_stats, ha_stats, season_stats, gamelog_stats = await asyncio.gather(
-            client.get(f"{MLB_BASE}/people/{mlb_id}", timeout=10.0),
+            _mlb_get(client, f"{MLB_BASE}/people/{mlb_id}", timeout=10.0),
             _get_stats_direct(client, mlb_id, "statSplits", season, {"sitCodes": "vl,vr"}),
             _get_stats_direct(client, mlb_id, "statSplits", season, {"sitCodes": "h,a"}),
             _get_stats_direct(client, mlb_id, "season", season),
@@ -492,7 +509,7 @@ async def get_career_vs_pitcher(hitter_id: int, pitcher_id: int) -> dict | None:
     """Return {avg, pa} for hitter's career stats vs this pitcher. None if < 10 PA."""
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.get(
+            resp = await _mlb_get(client,
                 f"{MLB_BASE}/people/{hitter_id}/stats",
                 params={
                     "stats": "vsPlayer",
