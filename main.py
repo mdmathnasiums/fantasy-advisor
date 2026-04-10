@@ -3,6 +3,7 @@ import asyncio
 import html
 import os
 import secrets
+import time
 from datetime import date
 
 import httpx
@@ -22,6 +23,44 @@ from advisor import HitterInfo, PitcherInfo, advise_roster
 
 app = FastAPI(title="Fantasy Baseball Advisor")
 templates = Jinja2Templates(directory="templates")
+
+# ---------------------------------------------------------------------------
+# Server-side response cache
+# Keyed by (date_str, league_id). Entries expire after CACHE_TTL seconds.
+# This means phone/Mac/tab-switch all share the same hot result — only the
+# first request per league per day does the expensive MLB API work.
+# ---------------------------------------------------------------------------
+CACHE_TTL = 600  # 10 minutes
+
+_response_cache: dict[tuple, dict] = {}        # (date_str, league_id) → result
+_response_cache_ts: dict[tuple, float] = {}    # (date_str, league_id) → timestamp
+_schedule_cache: dict[str, tuple] = {}         # date_str → (pitchers, teams, venue, lineups)
+_schedule_cache_ts: dict[str, float] = {}      # date_str → timestamp
+_inflight: dict[tuple, asyncio.Lock] = {}      # prevent duplicate concurrent fetches
+
+
+def _cache_get(key):
+    ts = _response_cache_ts.get(key, 0)
+    if time.monotonic() - ts < CACHE_TTL:
+        return _response_cache.get(key)
+    return None
+
+
+def _cache_set(key, value):
+    _response_cache[key] = value
+    _response_cache_ts[key] = time.monotonic()
+
+
+def _schedule_cache_get(date_str):
+    ts = _schedule_cache_ts.get(date_str, 0)
+    if time.monotonic() - ts < CACHE_TTL:
+        return _schedule_cache.get(date_str)
+    return None
+
+
+def _schedule_cache_set(date_str, value):
+    _schedule_cache[date_str] = value
+    _schedule_cache_ts[date_str] = time.monotonic()
 
 # --- Auth routes ---
 
@@ -287,14 +326,20 @@ async def _fetch_league(
 
 
 async def _get_schedule(query_date) -> tuple[dict, set, dict, dict]:
-    """Fetch pitchers + lineups for a date. Returns (pitchers, teams_with_game, game_venue, confirmed_lineups)."""
+    """Fetch pitchers + lineups for a date (cached for CACHE_TTL seconds)."""
+    date_str = query_date.isoformat()
+    cached = _schedule_cache_get(date_str)
+    if cached is not None:
+        return cached
     try:
         (pitchers, teams_with_game, game_venue), confirmed_lineups = await asyncio.gather(
             get_probable_pitchers(query_date),
             get_confirmed_lineups(query_date),
         )
         pitchers = await enrich_pitchers(pitchers)
-        return pitchers, teams_with_game, game_venue, confirmed_lineups
+        result = (pitchers, teams_with_game, game_venue, confirmed_lineups)
+        _schedule_cache_set(date_str, result)
+        return result
     except Exception as exc:
         print(f"[main] MLB schedule fetch failed: {exc}")
         return {}, set(), {}, {}
@@ -318,13 +363,30 @@ async def roster_view(game_date: str | None = None, league_id: str | None = None
     if league_id and league_id not in LEAGUES:
         raise HTTPException(status_code=404, detail=f"Unknown league_id: {league_id}")
 
-    pitchers, teams_with_game, game_venue, confirmed_lineups = await _get_schedule(query_date)
-
     if league_id:
-        # Single-league mode — half the API calls, used by the UI
-        return await _fetch_league(league_id, query_date, pitchers, teams_with_game, game_venue, confirmed_lineups)
+        # Single-league mode — used by the UI. Check cache first.
+        cache_key = (query_date.isoformat(), league_id)
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        # Use a per-key lock so two simultaneous requests (Mac + phone) don't
+        # both do the expensive work — the second waits and then reads from cache.
+        if cache_key not in _inflight:
+            _inflight[cache_key] = asyncio.Lock()
+        async with _inflight[cache_key]:
+            # Re-check after acquiring lock (another request may have just filled it)
+            cached = _cache_get(cache_key)
+            if cached is not None:
+                return cached
+
+            pitchers, teams_with_game, game_venue, confirmed_lineups = await _get_schedule(query_date)
+            result = await _fetch_league(league_id, query_date, pitchers, teams_with_game, game_venue, confirmed_lineups)
+            _cache_set(cache_key, result)
+            return result
 
     # All-leagues mode (kept for backward compat / legacy /api/today alias)
+    pitchers, teams_with_game, game_venue, confirmed_lineups = await _get_schedule(query_date)
     results = []
     for lid in LEAGUES:
         results.append(await _fetch_league(lid, query_date, pitchers, teams_with_game, game_venue, confirmed_lineups))
