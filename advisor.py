@@ -7,6 +7,29 @@ POSITION_ORDER = {
     "BN": 99, "IL": 100, "IL+": 101,
 }
 
+# League-average stat baselines by position, used when a player has no data
+# (rookies, players with tiny samples, first call-up of the season).
+# Values represent a typical full-season contribution at that spot.
+_POSITION_DEFAULTS: dict[str, dict] = {
+    "C":    {"avg": 0.245, "hr": 14, "rbi": 58, "r": 52, "sb": 4},
+    "1B":   {"avg": 0.265, "hr": 25, "rbi": 90, "r": 80, "sb": 4},
+    "2B":   {"avg": 0.260, "hr": 16, "rbi": 68, "r": 75, "sb": 12},
+    "3B":   {"avg": 0.260, "hr": 22, "rbi": 80, "r": 76, "sb": 6},
+    "SS":   {"avg": 0.262, "hr": 17, "rbi": 68, "r": 78, "sb": 14},
+    "OF":   {"avg": 0.262, "hr": 20, "rbi": 72, "r": 78, "sb": 12},
+    "LF":   {"avg": 0.262, "hr": 20, "rbi": 72, "r": 78, "sb": 12},
+    "CF":   {"avg": 0.262, "hr": 16, "rbi": 65, "r": 80, "sb": 20},
+    "RF":   {"avg": 0.265, "hr": 22, "rbi": 78, "r": 78, "sb": 8},
+    "DH":   {"avg": 0.260, "hr": 22, "rbi": 82, "r": 75, "sb": 4},
+}
+_DEFAULT_STATS = {"avg": 0.258, "hr": 18, "rbi": 70, "r": 72, "sb": 10}  # generic MLB avg
+
+
+def _pos_defaults(position: str) -> dict:
+    """Return baseline stats for a position, falling back to generic MLB average."""
+    pos = position.upper().split("/")[0].strip()  # handle "LF/CF" → "LF"
+    return _POSITION_DEFAULTS.get(pos, _DEFAULT_STATS)
+
 
 @dataclass
 class PitcherInfo:
@@ -71,12 +94,15 @@ def score_hitter(hitter: HitterInfo) -> tuple[float, dict]:
 
     # ── Hitter quality (65%) ────────────────────────────────────────────────
     # 5-category weights: BA 1.0, HR 1.0, RBI 1.0, R 1.0, SB 0.5 → total 4.5
-    # Ranges calibrated to realistic MLB player distribution
-    ba_norm  = norm(hitter.season_avg, 0.220, 0.340)
-    hr_norm  = norm(hitter.proj_hr,    5,     45)
-    rbi_norm = norm(hitter.proj_rbi,   30,    115)
-    r_norm   = norm(hitter.proj_r,     40,    115)
-    sb_norm  = norm(hitter.proj_sb,    0,     55)
+    # Ranges calibrated to realistic MLB player distribution.
+    # When a player has no data (rookie, no prior year), fall back to
+    # position-based league averages rather than a neutral 0.5.
+    pos_def = _pos_defaults(hitter.position)
+    ba_norm  = norm(hitter.season_avg if hitter.season_avg is not None else pos_def["avg"], 0.220, 0.340)
+    hr_norm  = norm(hitter.proj_hr    if hitter.proj_hr    is not None else pos_def["hr"],  5,     45)
+    rbi_norm = norm(hitter.proj_rbi   if hitter.proj_rbi   is not None else pos_def["rbi"], 30,    115)
+    r_norm   = norm(hitter.proj_r     if hitter.proj_r     is not None else pos_def["r"],   40,    115)
+    sb_norm  = norm(hitter.proj_sb    if hitter.proj_sb    is not None else pos_def["sb"],  0,     55)
     hitter_quality = (ba_norm + hr_norm + rbi_norm + r_norm + sb_norm * 0.5) / 4.5
 
     # ── Matchup quality (25%) ───────────────────────────────────────────────
