@@ -246,10 +246,14 @@
 </footer>
 
 <script>
-let allData = [];
-let activeLeagueId = null;
+// cache[dateStr][leagueId] = league result object
+const cache = {};
+const LEAGUE_IDS = ['4594', '20959'];
+const LEAGUE_NAMES = {'4594': 'The Gold Members', '20959': 'YCQ League'};
+
+let activeLeagueId = LEAGUE_IDS[0];
 let activeFilter = 'all';
-let activeDateOffset = 0;  // 0 = today, 1 = tomorrow
+let activeDateOffset = 0;
 
 function getDateStr(offset) {
   const d = new Date();
@@ -338,27 +342,33 @@ function fmtWhip(p) {
 function matchupPill(q) {
   if (q === 'good') return '<span class="matchup-pill matchup-good">Good</span>';
   if (q === 'bad') return '<span class="matchup-pill matchup-bad">Tough</span>';
-  return '';  // no pill for neutral matchups
+  return '';
 }
 
-function getLeagueData() {
-  return allData.find(l => l.league_id === activeLeagueId) || null;
+function getCachedLeague(dateStr, leagueId) {
+  return cache[dateStr]?.[leagueId] ?? null;
 }
 
-function renderTabs() {
+function setCachedLeague(dateStr, leagueId, data) {
+  if (!cache[dateStr]) cache[dateStr] = {};
+  cache[dateStr][leagueId] = data;
+}
+
+function renderTabs(dateStr) {
   const container = document.getElementById('league-tabs');
-  container.innerHTML = allData.map(l => `
-    <button class="tab-btn ${l.league_id === activeLeagueId ? 'active' : ''}"
-            data-id="${esc(l.league_id)}">${esc(l.league_name)}</button>
+  container.innerHTML = LEAGUE_IDS.map(lid => `
+    <button class="tab-btn ${lid === activeLeagueId ? 'active' : ''}"
+            data-id="${esc(lid)}">${esc(LEAGUE_NAMES[lid])}</button>
   `).join('');
   container.querySelectorAll('.tab-btn').forEach(btn => {
     btn.addEventListener('click', () => {
+      if (btn.dataset.id === activeLeagueId) return;
       activeLeagueId = btn.dataset.id;
       activeFilter = 'all';
       document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
       document.querySelector('.filter-btn[data-filter="all"]').classList.add('active');
-      renderTabs();
-      renderAll();
+      renderTabs(dateStr);
+      loadLeague(dateStr, activeLeagueId);
     });
   });
 }
@@ -469,7 +479,8 @@ function renderTable(league) {
 }
 
 function renderAll() {
-  const league = getLeagueData();
+  const dateStr = getDateStr(activeDateOffset);
+  const league = getCachedLeague(dateStr, activeLeagueId);
   renderStats(league);
   renderTable(league);
 }
@@ -482,6 +493,30 @@ document.querySelectorAll('.filter-btn').forEach(btn => {
     renderAll();
   });
 });
+
+// Fetch a single league, cache it, then render if it's still the active view
+async function loadLeague(dateStr, leagueId) {
+  // Show loading state
+  document.getElementById('loading').style.display = 'block';
+  document.getElementById('loading').textContent = 'Loading roster data…';
+  document.getElementById('main-table').style.display = 'none';
+
+  try {
+    const resp = await fetch(`/api/roster?game_date=${dateStr}&league_id=${encodeURIComponent(leagueId)}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    setCachedLeague(dateStr, leagueId, data);
+  } catch (err) {
+    setCachedLeague(dateStr, leagueId, { error: err.message });
+    document.getElementById('error-container').innerHTML =
+      `<div class="error-msg">Failed to load data: ${esc(err.message)}. Check that Yahoo auth is configured.</div>`;
+  }
+
+  // Only render if this is still the active league/date
+  if (leagueId === activeLeagueId && dateStr === getDateStr(activeDateOffset)) {
+    renderAll();
+  }
+}
 
 async function loadData(offset) {
   activeDateOffset = offset;
@@ -498,39 +533,18 @@ async function loadData(offset) {
   document.getElementById('stat-nogame-label').textContent =
     offset === 0 ? 'No Game Today' : 'No Game Tomorrow';
 
-  // Show loading
-  document.getElementById('loading').style.display = 'block';
-  document.getElementById('loading').textContent = offset === 0 ? 'Loading roster data…' : 'Loading tomorrow\'s matchups…';
-  document.getElementById('main-table').style.display = 'none';
   document.getElementById('error-container').innerHTML = '';
 
   const dateStr = getDateStr(offset);
-  try {
-    const resp = await fetch(`/api/roster?game_date=${dateStr}`);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    allData = await resp.json();
-  } catch (err) {
-    document.getElementById('error-container').innerHTML =
-      `<div class="error-msg">Failed to load data: ${esc(err.message)}. Check that Yahoo auth is configured.</div>`;
-    document.getElementById('loading').textContent = 'Error loading data.';
-    return;
-  }
+  renderTabs(dateStr);
 
-  if (!allData.length) {
-    document.getElementById('loading').textContent = 'No leagues found.';
-    return;
+  // Check cache first; only fetch if not already cached
+  const cached = getCachedLeague(dateStr, activeLeagueId);
+  if (cached) {
+    renderAll();
+  } else {
+    await loadLeague(dateStr, activeLeagueId);
   }
-
-  // Preserve active league across date switches if possible, else default to first
-  if (!allData.find(l => l.league_id === activeLeagueId)) {
-    activeLeagueId = allData[0].league_id;
-  }
-  activeFilter = 'all';
-  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-  document.querySelector('.filter-btn[data-filter="all"]').classList.add('active');
-
-  renderTabs();
-  renderAll();
 }
 
 // ---- Waiver panel ----
@@ -594,14 +608,13 @@ function openWaiverPanel() {
   panel.style.display = 'block';
   btn.classList.add('active');
 
-  // Populate league select
+  // Populate league select from LEAGUE_IDS/LEAGUE_NAMES
   const sel = document.getElementById('waiver-league-select');
-  sel.innerHTML = allData.map(l =>
-    `<option value="${esc(l.league_id)}" ${l.league_id === activeLeagueId ? 'selected' : ''}>${esc(l.league_name)}</option>`
+  sel.innerHTML = LEAGUE_IDS.map(lid =>
+    `<option value="${esc(lid)}" ${lid === activeLeagueId ? 'selected' : ''}>${esc(LEAGUE_NAMES[lid])}</option>`
   ).join('');
 
   loadWaivers(sel.value);
-  // Scroll panel into view
   panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
@@ -622,18 +635,15 @@ document.getElementById('waiver-league-select').addEventListener('change', funct
   loadWaivers(this.value);
 });
 
-// ---- Date toggle
+// ---- Date toggle ----
+document.querySelectorAll('.date-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     const offset = parseInt(btn.dataset.offset);
     if (offset !== activeDateOffset) loadData(offset);
   });
 });
 
-function init() {
-  loadData(0);
-}
-
-init();
+loadData(0);
 </script>
 </body>
 </html>

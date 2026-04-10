@@ -245,8 +245,68 @@ async def _enrich_hitter(
 PITCHER_POSITIONS = {"SP", "RP", "P"}
 
 
+async def _fetch_league(
+    league_id: str,
+    query_date,
+    pitchers: dict,
+    teams_with_game: set,
+    game_venue: dict,
+    confirmed_lineups: dict,
+) -> dict:
+    """Fetch + score one league's roster. Returns a single league result dict."""
+    league_info = LEAGUES[league_id]
+    try:
+        raw_players = await get_roster(league_id)
+    except Exception as e:
+        return {"league_id": league_id, "league_name": league_info["name"], "error": str(e)}
+
+    candidates = [
+        p for p in raw_players
+        if p["position"] not in PITCHER_POSITIONS
+        and not any(ep in PITCHER_POSITIONS for ep in p.get("eligible_positions", []))
+    ]
+
+    hitters = await asyncio.gather(
+        *[_enrich_hitter(p, pitchers, teams_with_game, game_venue, query_date.year, confirmed_lineups)
+          for p in candidates]
+    )
+
+    advised = advise_roster(list(hitters))
+    return {
+        "league_id": league_id,
+        "league_name": league_info["name"],
+        "date": query_date.isoformat(),
+        "players": advised,
+        "stats": {
+            "active_hitters": sum(1 for p in advised if p["has_game"]),
+            "strong_matchups": sum(1 for p in advised if p["matchup_quality"] == "good"),
+            "tough_matchups": sum(1 for p in advised if p["matchup_quality"] == "bad"),
+            "no_game": sum(1 for p in advised if not p["has_game"]),
+        },
+    }
+
+
+async def _get_schedule(query_date) -> tuple[dict, set, dict, dict]:
+    """Fetch pitchers + lineups for a date. Returns (pitchers, teams_with_game, game_venue, confirmed_lineups)."""
+    try:
+        (pitchers, teams_with_game, game_venue), confirmed_lineups = await asyncio.gather(
+            get_probable_pitchers(query_date),
+            get_confirmed_lineups(query_date),
+        )
+        pitchers = await enrich_pitchers(pitchers)
+        return pitchers, teams_with_game, game_venue, confirmed_lineups
+    except Exception as exc:
+        print(f"[main] MLB schedule fetch failed: {exc}")
+        return {}, set(), {}, {}
+
+
 @app.get("/api/roster")
-async def roster_view(game_date: str | None = None):
+async def roster_view(game_date: str | None = None, league_id: str | None = None):
+    """Fetch scored roster data.
+
+    - game_date: YYYY-MM-DD (default today)
+    - league_id: if provided, returns a single league dict; otherwise returns list of all leagues.
+    """
     if game_date:
         try:
             query_date = date.fromisoformat(game_date)
@@ -255,57 +315,19 @@ async def roster_view(game_date: str | None = None):
     else:
         query_date = date.today()
 
-    teams_with_game: set[str] = set()
-    game_venue: dict[str, str] = {}
-    confirmed_lineups: dict = {}
-    try:
-        (pitchers, teams_with_game, game_venue), confirmed_lineups = await asyncio.gather(
-            get_probable_pitchers(query_date),
-            get_confirmed_lineups(query_date),
-        )
-        pitchers = await enrich_pitchers(pitchers)
-    except Exception as exc:
-        print(f"[main] MLB schedule fetch failed: {exc}")
-        pitchers = {}  # degrade gracefully — all hitters get has_game=False
+    if league_id and league_id not in LEAGUES:
+        raise HTTPException(status_code=404, detail=f"Unknown league_id: {league_id}")
 
+    pitchers, teams_with_game, game_venue, confirmed_lineups = await _get_schedule(query_date)
+
+    if league_id:
+        # Single-league mode — half the API calls, used by the UI
+        return await _fetch_league(league_id, query_date, pitchers, teams_with_game, game_venue, confirmed_lineups)
+
+    # All-leagues mode (kept for backward compat / legacy /api/today alias)
     results = []
-    for league_id, league_info in LEAGUES.items():
-        try:
-            raw_players = await get_roster(league_id)
-        except Exception as e:
-            results.append({
-                "league_id": league_id,
-                "league_name": league_info["name"],
-                "error": str(e),
-            })
-            continue
-
-        candidates = [
-            p for p in raw_players
-            if p["position"] not in PITCHER_POSITIONS
-            and not any(ep in PITCHER_POSITIONS for ep in p.get("eligible_positions", []))
-        ]
-
-        hitters = await asyncio.gather(
-            *[_enrich_hitter(p, pitchers, teams_with_game, game_venue, query_date.year, confirmed_lineups)
-              for p in candidates]
-        )
-
-        advised = advise_roster(list(hitters))
-
-        results.append({
-            "league_id": league_id,
-            "league_name": league_info["name"],
-            "date": query_date.isoformat(),
-            "players": advised,
-            "stats": {
-                "active_hitters": sum(1 for p in advised if p["has_game"]),
-                "strong_matchups": sum(1 for p in advised if p["matchup_quality"] == "good"),
-                "tough_matchups": sum(1 for p in advised if p["matchup_quality"] == "bad"),
-                "no_game": sum(1 for p in advised if not p["has_game"]),
-            },
-        })
-
+    for lid in LEAGUES:
+        results.append(await _fetch_league(lid, query_date, pitchers, teams_with_game, game_venue, confirmed_lineups))
     return results
 
 
