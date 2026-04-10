@@ -315,14 +315,17 @@ function hotColdBadge(recentAvg) {
 
 function scoreBreakdownTitle(bd) {
   if (!bd) return '';
-  return [
-    `Split (${bd.split_source}): ${bd.split_avg_used} × 3.0 = ${bd.split_component}`,
-    `ERA (${bd.era_source}): ${bd.era_used} → ${bd.era_component}`,
-    `WHIP (${bd.whip_source}): ${bd.whip_used} → ${bd.whip_component}`,
-    bd.streak_modifier !== 1.0 ? `Streak modifier: ×${bd.streak_modifier}` : null,
-    bd.park_factor !== 1.0 ? `Park factor: ×${bd.park_factor}` : null,
+  const lines = [
+    `Hitter quality (65%): ${bd.hitter_quality}`,
+    `  BA: ${bd.ba_norm} | HR: ${bd.hr_norm} | RBI: ${bd.rbi_norm} | R: ${bd.r_norm} | SB: ${bd.sb_norm}`,
+    `Matchup (25%): ${bd.matchup_quality}`,
+    `  Split (${bd.split_source}): ${bd.split_avg_used} → ${bd.split_norm}`,
+    `  ERA: ${bd.era_used ?? 'n/a'} → ${bd.era_norm} | WHIP: ${bd.whip_used ?? 'n/a'} → ${bd.whip_norm}`,
+    `Context (10%): ${bd.context}`,
+    `  Streak: ${bd.streak_score} | Park: ${bd.park_score}`,
     `Total score: ${bd.total}`,
-  ].filter(Boolean).join('\n');
+  ];
+  return lines.join('\n');
 }
 
 function fmtEra(p) {

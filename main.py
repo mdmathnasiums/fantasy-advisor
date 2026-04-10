@@ -202,6 +202,11 @@ async def _enrich_hitter(
     ops = None
     recent_avg = None
     career_vs_pitcher = None
+    season_avg = None
+    proj_hr = None
+    proj_rbi = None
+    proj_r = None
+    proj_sb = None
 
     if mlb_id:
         try:
@@ -222,6 +227,11 @@ async def _enrich_hitter(
                 bats = details.get("bats") or bats
                 ops = details.get("ops")
                 recent_avg = details.get("recent_avg")
+                season_avg = details.get("season_avg")
+                proj_hr = details.get("proj_hr")
+                proj_rbi = details.get("proj_rbi")
+                proj_r = details.get("proj_r")
+                proj_sb = details.get("proj_sb")
 
             if len(results) > 1 and not isinstance(results[1], Exception):
                 career_vs_pitcher = results[1]
@@ -278,6 +288,11 @@ async def _enrich_hitter(
         is_home=is_home,
         confirmed_start=confirmed_start,
         confirmed_sit=confirmed_sit,
+        season_avg=season_avg,
+        proj_hr=proj_hr,
+        proj_rbi=proj_rbi,
+        proj_r=proj_r,
+        proj_sb=proj_sb,
     )
 
 

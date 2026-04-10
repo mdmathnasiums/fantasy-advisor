@@ -416,20 +416,59 @@ async def get_hitter_details(mlb_id: int, season: int | None = None) -> dict:
     home_avg = ha_data["home_avg"]
     away_avg = ha_data["away_avg"]
 
-    # --- OPS from season stats ---
+    # --- OPS and counting stats from season stats ---
     ops = None
+    season_avg = None
+    season_hr = None
+    season_rbi = None
+    season_r = None
+    season_sb = None
+    games_played = 0
     if not isinstance(season_stats, Exception):
         for sg in season_stats:
             for split in sg.get("splits", []):
-                ops_str = split.get("stat", {}).get("ops")
+                stat = split.get("stat", {})
+                ops_str = stat.get("ops")
                 if ops_str:
                     try:
                         ops = float(ops_str)
                     except (ValueError, TypeError):
                         pass
-                    break
-            if ops is not None:
+                avg_str = stat.get("avg")
+                if avg_str:
+                    try:
+                        season_avg = float(avg_str)
+                    except (ValueError, TypeError):
+                        pass
+                try:
+                    season_hr = int(stat["homeRuns"])
+                except (KeyError, ValueError, TypeError):
+                    pass
+                try:
+                    season_rbi = int(stat["rbi"])
+                except (KeyError, ValueError, TypeError):
+                    pass
+                try:
+                    season_r = int(stat["runs"])
+                except (KeyError, ValueError, TypeError):
+                    pass
+                try:
+                    season_sb = int(stat["stolenBases"])
+                except (KeyError, ValueError, TypeError):
+                    pass
+                try:
+                    games_played = int(stat["gamesPlayed"])
+                except (KeyError, ValueError, TypeError):
+                    pass
                 break
+            if ops is not None or season_avg is not None:
+                break
+
+    # Projected 162-game pace (only if games_played >= 10)
+    proj_hr = round(season_hr * 162.0 / games_played, 1) if games_played >= 10 and season_hr is not None else None
+    proj_rbi = round(season_rbi * 162.0 / games_played, 1) if games_played >= 10 and season_rbi is not None else None
+    proj_r = round(season_r * 162.0 / games_played, 1) if games_played >= 10 and season_r is not None else None
+    proj_sb = round(season_sb * 162.0 / games_played, 1) if games_played >= 10 and season_sb is not None else None
 
     # --- Prior-season fallback (early in the year — before June 1) ---
     # Also fall back when current-year sample is too small to trust (< 15 AB vs either hand).
@@ -438,6 +477,7 @@ async def get_hitter_details(mlb_id: int, season: int | None = None) -> dict:
         splits_data.get("vL_ab", 0) < MIN_SPLIT_AB or
         splits_data.get("vR_ab", 0) < MIN_SPLIT_AB
     )
+    prior_hr = prior_rbi = prior_r = prior_sb = prior_season_avg = None
     if use_fallback and (vl_avg is None or vr_avg is None or thin_sample):
         try:
             async with httpx.AsyncClient() as prior_client:
@@ -455,20 +495,54 @@ async def get_hitter_details(mlb_id: int, season: int | None = None) -> dict:
                 home_avg = prior_ha_data["home_avg"]
                 away_avg = prior_ha_data["away_avg"]
                 print(f"[mlb_api] using {season - 1} splits for player {mlb_id}: vL={vl_avg} vR={vr_avg}")
-            if ops is None and not isinstance(prior_season, Exception):
+            if not isinstance(prior_season, Exception):
                 for sg in prior_season:
                     for split in sg.get("splits", []):
-                        ops_str = split.get("stat", {}).get("ops")
-                        if ops_str:
+                        stat = split.get("stat", {})
+                        ops_str = stat.get("ops")
+                        if ops_str and ops is None:
                             try:
                                 ops = float(ops_str)
                             except (ValueError, TypeError):
                                 pass
-                            break
-                    if ops is not None:
+                        avg_str = stat.get("avg")
+                        if avg_str:
+                            try:
+                                prior_season_avg = float(avg_str)
+                            except (ValueError, TypeError):
+                                pass
+                        try:
+                            prior_hr = int(stat["homeRuns"])
+                        except (KeyError, ValueError, TypeError):
+                            pass
+                        try:
+                            prior_rbi = int(stat["rbi"])
+                        except (KeyError, ValueError, TypeError):
+                            pass
+                        try:
+                            prior_r = int(stat["runs"])
+                        except (KeyError, ValueError, TypeError):
+                            pass
+                        try:
+                            prior_sb = int(stat["stolenBases"])
+                        except (KeyError, ValueError, TypeError):
+                            pass
                         break
         except Exception as exc:
             print(f"[mlb_api] prior-season fallback failed for {mlb_id}: {exc}")
+
+        # If early season and games_played < 30, use prior year actuals as projection base
+        if games_played < 30:
+            if prior_hr is not None:
+                proj_hr = float(prior_hr)
+            if prior_rbi is not None:
+                proj_rbi = float(prior_rbi)
+            if prior_r is not None:
+                proj_r = float(prior_r)
+            if prior_sb is not None:
+                proj_sb = float(prior_sb)
+            if prior_season_avg is not None and season_avg is None:
+                season_avg = prior_season_avg
     else:
         print(f"[mlb_api] {season} splits for player {mlb_id}: vL={vl_avg} vR={vr_avg} OPS={ops}")
 
@@ -502,6 +576,11 @@ async def get_hitter_details(mlb_id: int, season: int | None = None) -> dict:
         "away_avg": away_avg,
         "ops": ops,
         "recent_avg": recent_avg,
+        "season_avg": season_avg,
+        "proj_hr": proj_hr,
+        "proj_rbi": proj_rbi,
+        "proj_r": proj_r,
+        "proj_sb": proj_sb,
     }
 
 

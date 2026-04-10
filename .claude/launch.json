@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "fantasy-advisor",
+      "runtimeExecutable": "/usr/bin/python3",
+      "runtimeArgs": ["-m", "uvicorn", "main:app", "--app-dir", "/Users/mattdiamond/fantasy-advisor", "--reload", "--port", "8000"],
+      "port": 8000
+    }
+  ]
+}
