@@ -241,6 +241,7 @@
 </main>
 
 <footer>
+  <button class="footer-btn" id="refresh-btn" title="Force reload current league">↺ Refresh</button>
   <button class="footer-btn" id="waiver-btn">Waiver Suggestions</button>
   <button class="footer-btn" disabled title="Coming in v2">Push Lineup to Yahoo</button>
 </footer>
@@ -644,6 +645,15 @@ document.querySelectorAll('.date-btn').forEach(btn => {
     const offset = parseInt(btn.dataset.offset);
     if (offset !== activeDateOffset) loadData(offset);
   });
+});
+
+// ---- Refresh button ----
+document.getElementById('refresh-btn').addEventListener('click', () => {
+  const dateStr = getDateStr(activeDateOffset);
+  // Bust the cache for current league+date so loadLeague does a fresh fetch
+  if (cache[dateStr]) delete cache[dateStr][activeLeagueId];
+  document.getElementById('error-container').innerHTML = '';
+  loadLeague(dateStr, activeLeagueId);
 });
 
 loadData(0);

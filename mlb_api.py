@@ -147,8 +147,20 @@ def _parse_ip(ip_str) -> float:
         return 0.0
 
 
+MIN_PITCHER_STARTS = 4          # below this we don't trust current-season ERA/WHIP
+LEAGUE_AVG_ERA    = 4.20        # fallback for pitchers with no usable history
+LEAGUE_AVG_WHIP   = 1.28
+
+
 async def get_pitcher_details(mlb_id: int, season: int | None = None) -> dict:
-    """Get pitcher's throws (L/R), season ERA/WHIP, and recent 3-start blended ERA/WHIP."""
+    """Get pitcher's throws (L/R), season ERA/WHIP, and recent 3-start blended ERA/WHIP.
+
+    Small-sample guard: if the pitcher has fewer than MIN_PITCHER_STARTS (4) this
+    season, fall back to prior-year full-season ERA/WHIP.  If no prior-year data
+    exists either (true rookie or no MLB history), use league-average values so a
+    0.71 ERA from one April start doesn't make every hitter look like they're
+    facing Sandy Koufax.
+    """
     season = season or date.today().year
     async with httpx.AsyncClient() as client:
         season_resp, gamelog_resp = await asyncio.gather(
@@ -170,6 +182,7 @@ async def get_pitcher_details(mlb_id: int, season: int | None = None) -> dict:
     person = season_resp.json().get("people", [{}])[0]
     throws = person.get("pitchHand", {}).get("code", "R")
     era = whip = None
+    season_gs = 0   # games started this season
     for stat_group in person.get("stats", []):
         splits = stat_group.get("splits", [])
         if splits:
@@ -182,7 +195,51 @@ async def get_pitcher_details(mlb_id: int, season: int | None = None) -> dict:
                 whip = float(stat["whip"])
             except (KeyError, ValueError, TypeError):
                 pass
+            try:
+                season_gs = int(stat.get("gamesStarted", 0))
+            except (ValueError, TypeError):
+                pass
             break
+
+    # --- Small-sample guard: < 4 starts → fall back to prior year ---
+    if season_gs < MIN_PITCHER_STARTS:
+        try:
+            async with httpx.AsyncClient() as prior_client:
+                prior_resp = await _mlb_get(prior_client,
+                    f"{MLB_BASE}/people/{mlb_id}",
+                    params={"hydrate": f"stats(group=pitching,type=season,season={season - 1})"},
+                    timeout=10.0,
+                )
+                prior_resp.raise_for_status()
+                prior_person = prior_resp.json().get("people", [{}])[0]
+                prior_era = prior_whip = None
+                for sg in prior_person.get("stats", []):
+                    sp = sg.get("splits", [])
+                    if sp:
+                        st = sp[0].get("stat", {})
+                        try:
+                            prior_era = float(st["era"])
+                        except (KeyError, ValueError, TypeError):
+                            pass
+                        try:
+                            prior_whip = float(st["whip"])
+                        except (KeyError, ValueError, TypeError):
+                            pass
+                        break
+                if prior_era is not None:
+                    era = prior_era
+                    print(f"[mlb_api] pitcher {mlb_id}: {season_gs} starts, using {season-1} ERA {era}")
+                if prior_whip is not None:
+                    whip = prior_whip
+        except Exception as exc:
+            print(f"[mlb_api] pitcher {mlb_id} prior-year fallback failed: {exc}")
+
+        # If still no data (true rookie / no MLB history) use league averages
+        if era is None:
+            era = LEAGUE_AVG_ERA
+            print(f"[mlb_api] pitcher {mlb_id}: no history, using league-avg ERA {era}")
+        if whip is None:
+            whip = LEAGUE_AVG_WHIP
 
     # --- Recent 3 starts ---
     recent_era = recent_whip = None
@@ -199,7 +256,8 @@ async def get_pitcher_details(mlb_id: int, season: int | None = None) -> dict:
         # Sort newest first, take 3
         starts.sort(key=lambda s: s["date"], reverse=True)
         recent = [s["stat"] for s in starts[:3]]
-        if recent:
+        # Only use recent-start blend if pitcher has enough starts to be meaningful
+        if recent and season_gs >= MIN_PITCHER_STARTS:
             total_er = sum(int(s.get("earnedRuns", 0)) for s in recent)
             total_ip = sum(_parse_ip(s.get("inningsPitched", "0")) for s in recent)
             total_hits = sum(int(s.get("hits", 0)) for s in recent)
@@ -210,7 +268,7 @@ async def get_pitcher_details(mlb_id: int, season: int | None = None) -> dict:
     except Exception as exc:
         print(f"[mlb_api] pitcher recent form failed for {mlb_id}: {exc}")
 
-    # Blend: 60% recent + 40% season
+    # Blend: 60% recent + 40% season (only when recent is available)
     eff_era = era
     eff_whip = whip
     if recent_era is not None and era is not None:
